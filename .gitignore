@@ -16,3 +16,7 @@ tags
 /perf_test/results_math_stdout.txt
 /perf_test/card_asm_dump.s
 /perf_test/bench-normals
+/perf_test/test_shapes
+/perf_test/bench_shapes
+/perf_test/bench_shapes_vs_par
+/perf_test/shapes_out.obj

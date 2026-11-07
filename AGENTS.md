@@ -506,6 +506,21 @@ Consequences for other code:
 - A rotation matrix needs no special path (`C == A`); a uniform scale gives `C == s^2 * A`; the translation column is never read.
 - `test_math.c` asserts the reflection case in both directions: the cofactor normal keeps `-z`, and `inverse(M)^T` returns `+z`. That second assertion exists so that "simplifying" the function back to an inverse-transpose fails the build with an explanation instead of shipping.
 
+### 3.17 A Correct Hash Table Can Still Be Quadratic - Hash the Key You Stored
+
+*(Source: `mu/mu_shapes.h` subdivision and weld; evidence `perf_test/PERF_SHAPES.md` + the frozen `ref.*` rows in `perf_test/bench_shapes.c`; narrative `docs/shapes.md`)*
+
+**The rule.** In an open-addressed table that stores `key + 1` so that `0` can mean "empty slot", the **lookup must hash the raw key and then offset it** - never hash the offset key. And before rewriting an inner loop for cache behaviour, verify its probe count.
+
+The subdivision table stores `pair + 1`. Insert hashed the raw pair; lookup hashed the offset pair. Both correct: the linear probe walks from the wrong home bucket to the right slot. What nobody notices is the cost - the walk starts at a random dense position and scans until it hits the entry, so every lookup is `O(load factor)` and subdivision is `O(n^2)`. A 20 480-triangle mesh subdivides in **305 ms** instead of **0.8 ms**; icosphere level 5 goes from 175.9 ms to 5.1 ms (34.6x) once the probe hashes the raw key, and the probe counter in the same build drops from **16 081 678 to 3 840**.
+
+The same lesson in the weld: a tolerance search that probes the textbook 3x3x3 neighbourhood costs 27 random accesses per vertex into a multi-megabyte table - 550 ns/vertex, 70 ms for a 132k-point sphere. With cells `2*eps` wide the eps ball spans one cell width, so `floor((p-eps)/w)` and `floor(peps/w)` differ by at most one: **eight** probes, same exact answer, 130 ns/vertex.
+
+Consequences:
+- A perf symptom that looks like cache misses may be an algorithmic `O(n^2)`. Count probes before you pad the struct.
+- Table sizing is part of the fix: `3n + 8` slots is the worst case for an edge table (three unique edges per triangle) and cannot fill up, so the linear probe always terminates. `6n + 8` doubles the memset and the scan for nothing.
+- Introspection does not need the subdivision payload: a count-only table (`(count, winding)` in 2 bytes, 8-byte key array) is 60 ms -> 12 ms on a 261k-triangle mesh. When two tables classify the same thing, the gate must compare them on a closed, an open, a non-manifold and an inconsistently wound mesh.
+
 ---
 
 ## 4. Existence-based processing

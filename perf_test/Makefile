@@ -120,8 +120,39 @@ bench-normals: bench_normals.c ../mu/mu_math.h ../mu/mu_bench.h
 	$(CC) $(CFLAGS) $(INCLUDES) -o bench_normals bench_normals.c -lm
 	taskset -c 0 ./bench_normals --samples=21 --confidence=6
 
+# ---------------------------------------------------------------------------
+# mu_shapes.h: correctness gate, generator/mesh-surgery benchmark, and the
+# par_shapes.h comparison. PAR_SHAPES points at a par_shapes.h checkout (the
+# header this one replaces); only the comparison target needs it.
+# ---------------------------------------------------------------------------
+PAR_SHAPES ?= ../../par_shapes.h
+
+shapes-test: test_shapes
+	./test_shapes
+
+test_shapes: test_shapes.c ../mu/mu_shapes.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_shapes.c -lm
+
+# Wants >=21 samples on one pinned core: not part of run-proofs.
+shapes-bench: bench_shapes
+	taskset -c 0 ./bench_shapes --samples=21 --confidence=6
+
+bench_shapes: bench_shapes.c ../mu/mu_shapes.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_shapes.c -lm
+
+# -Wno-unused-parameter: par_shapes.h has unused userdata params in its own
+# parametric callbacks. It is upstream code; not ours to fix.
+shapes-par: bench_shapes_vs_par
+	@test -f $(PAR_SHAPES) || { echo "missing $(PAR_SHAPES); set PAR_SHAPES=<path to par_shapes.h>"; exit 1; }
+	sh shapes_vs_par.sh
+
+bench_shapes_vs_par: bench_shapes_vs_par.c ../mu/mu_shapes.h ../mu/mu_bench.h $(PAR_SHAPES)
+	$(CC) $(CFLAGS) -Wno-unused-parameter $(INCLUDES) -I../.. -o $@ bench_shapes_vs_par.c -lm
+
 clean:
 	rm -f $(ORIG_TARGETS) $(ST_PROOFS) $(MT_PROOFS) card_asm_dump.s \
-	      test_math bench_math results_math.csv $(DS_TESTS) bench_intrusive bench_normals bench_wfc
+	      test_math bench_math results_math.csv $(DS_TESTS) bench_intrusive bench_normals bench_wfc \
+	      test_shapes bench_shapes bench_shapes_vs_par
 
-.PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals clean
+.PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals \
+        shapes-test shapes-bench shapes-par clean

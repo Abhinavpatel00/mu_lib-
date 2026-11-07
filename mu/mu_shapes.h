@@ -24,6 +24,11 @@
  *      signed-distance function into a watertight triangle mesh via marching
  *      tetrahedra. That last one is how you get shapes nobody has parametrized:
  *      smooth-unioned metaballs, gyroids, blobs, whatever.
+ *      Section 10 goes one step further and generates geometry from a grammar:
+ *      an L-system with a 3D turtle, for branch structure that no hand-written
+ *      (u,v) patch expresses. par_shapes' "lsystem" is a stack machine over
+ *      (command, arg) pairs and does not rewrite strings, so the textbook
+ *      grammars do not port to it.
  *
  *   2. MESH OPERATIONS THAT KNOW WHAT A MESH IS.
  *      par_shapes_weld exists; it sorts vertex pairs. Ours is a spatial hash
@@ -109,6 +114,7 @@
 
 #include "mu_macros.h"
 #include "mu_math.h"
+#include "mu_pcg.h"        /* seeded RNG for stochastic L-system grammars */
 
 MU_BEGIN_EXTERN_C
 
@@ -281,6 +287,7 @@ MU_INLINE mu_shape mu_shape__finish(mu_shape s)
 MU_INLINE void mu_shape_flip(mu_shape *s);
 MU_INLINE int  mu_shape_compute_normals(mu_shape *s);
 MU_INLINE void mu_shape_compact(mu_shape *s);
+MU_INLINE uint32_t mu_shape_remove_degenerate(mu_shape *s, float min_area);
 
 /* ==========================================================================
  * 2. Primitive builders shared by the generators
@@ -689,6 +696,11 @@ MU_INLINE mu_shape mu_shape_capsule(int slices, int stacks, float radius, float 
     int i, j;
     float h = 0.5f * height;
     int cap_stacks = stacks;
+    /* rows: cap_stacks on the top hemisphere, one at the bottom of the cylinder,
+     * cap_stacks-1 on the bottom hemisphere. The pole itself is a SINGLE vertex:
+     * walking the parametric angle all the way to pi (as the first version did)
+     * leaves a row of coincident points at the pole and zero-area triangles in
+     * the closing fan. */
     int rings = 2 * cap_stacks + 2;
     uint32_t north, south;
 
@@ -703,7 +715,7 @@ MU_INLINE mu_shape mu_shape_capsule(int slices, int stacks, float radius, float 
                                           0.5f, 0.0f);
 
     /* top cap: phi from 0 (pole) to pi/2 (equator), then the straight side */
-    for (j = 1; j < rings; ++j)
+    for (j = 1; j < rings - 1; ++j)
     {
         float v = (float)j / (float)rings;
         float phi, y, r;
@@ -721,10 +733,10 @@ MU_INLINE mu_shape mu_shape_capsule(int slices, int stacks, float radius, float 
         }
         else
         {
-            phi = 0.5f * MU_SHAPE_PI * (1.0f + (float)(j - cap_stacks - 1) /
-                                        (float)cap_stacks);
-            y = -h + radius * cosf(phi);
-            r = radius * sinf(phi);
+            float th = 0.5f * MU_SHAPE_PI * (float)(j - cap_stacks - 1) /
+                       (float)cap_stacks;
+            y = -h - radius * sinf(th);
+            r = radius * cosf(th);
         }
         for (i = 0; i <= slices; ++i)
         {
@@ -739,7 +751,7 @@ MU_INLINE mu_shape mu_shape_capsule(int slices, int stacks, float radius, float 
     for (i = 0; i < slices; ++i)
         mu_shape_add_triangle(&s, north, 1u + (uint32_t)i + 1u, 1u + (uint32_t)i);
 
-    for (j = 1; j < rings - 1; ++j)
+    for (j = 1; j < rings - 2; ++j)
     {
         uint32_t r0 = 1u + (uint32_t)(j - 1) * (uint32_t)(slices + 1);
         uint32_t r1 = 1u + (uint32_t)j * (uint32_t)(slices + 1);
@@ -754,7 +766,7 @@ MU_INLINE mu_shape mu_shape_capsule(int slices, int stacks, float radius, float 
         }
     }
     {
-        uint32_t last = 1u + (uint32_t)(rings - 2) * (uint32_t)(slices + 1);
+        uint32_t last = 1u + (uint32_t)(rings - 3) * (uint32_t)(slices + 1);
         for (i = 0; i < slices; ++i)
             mu_shape_add_triangle(&s, last + (uint32_t)i, last + (uint32_t)i + 1u, south);
     }
@@ -1260,6 +1272,9 @@ MU_INLINE mu_shape mu_shape_supershape(const mu_shape_superformula *f, int slice
      * usually written, so the winding comes out inward: flip once here rather
      * than reversing every triangle above */
     mu_shape_flip(&s);
+    /* n11 < 1 lets the superformula radius reach zero between lobes; those
+     * triangles have no area and only confuse everything downstream. */
+    mu_shape_remove_degenerate(&s, 1e-7f * radius * radius);
     mu_shape_compact(&s);
     return mu_shape__finish(s);
 }
@@ -1486,6 +1501,11 @@ MU_INLINE mu_shape mu_shape_lathe(const mu_vec2 *profile, int n, int slices,
             }
         }
     }
+    /* a profile point with radius 0 is a pole: its row is `slices` coincident
+     * vertices, so drop the triangles that collapsed with it and the vertices
+     * nothing references any more */
+    mu_shape_remove_degenerate(&s, 0.0f);
+    mu_shape_compact(&s);
     return mu_shape__finish(s);
 }
 
@@ -1800,8 +1820,9 @@ MU_INLINE mu_shape mu_shape_extrude(const mu_vec2 *poly, int n, float height, fl
     mu_shape s = mu_shape_empty();
     mu_vec2 *p;
     int *tris;
-    int ntri, i, ok;
+    int ntri, i, j, ok;
     int ccw;
+    int segments;
     float area2 = 0.0f;
     float cx = 0.0f, cz = 0.0f;
     float h = 0.5f * height;
@@ -1826,43 +1847,53 @@ MU_INLINE mu_shape mu_shape_extrude(const mu_vec2 *poly, int n, float height, fl
     ntri = mu_shape__ear_clip(p, n, tris);
     ok = ntri > 0;
 
-    if (!mu_shape_reserve(&s, (uint32_t)(2 * n + 2), (uint32_t)(2 * n + 2 * ntri)))
+    /* Why rings and not two quads. Interpolating the corners linearly between
+     * the bottom ring and one rotated top ring does NOT sweep a rotated polygon:
+     * every corner travels a chord instead of an arc, so the mid-height
+     * cross-section is smaller than the polygon and the volume silently shrinks
+     * (7.42 of 8 at a 0.2 rad twist, 5.65 at 0.7). Inserting a ring every pi/8
+     * makes each intermediate cross-section an exact rotated copy - volume is
+     * then the polygon area times the height, which the gate checks. */
+    segments = 1 + (int)(fabsf(twist) / (MU_SHAPE_PI / 32.0f));
+    if (segments > 32) segments = 32;
+
+    if (!mu_shape_reserve(&s, (uint32_t)((segments + 1) * n + 2),
+                          (uint32_t)(2 * segments * n + 2 * ntri)))
     {
         MU_FREE(p); MU_FREE(tris);
         return s;
     }
 
+    for (j = 0; j <= segments; ++j)
     {
-        float ct = cosf(twist), st = sinf(twist);
-        for (i = 0; i < 2; ++i)
+        float t = (float)j / (float)segments;
+        float ang = twist * t;
+        float ct = cosf(ang), st = sinf(ang);
+        float y = -h + height * t;
+        for (i = 0; i < n; ++i)
         {
-            int j;
-            for (j = 0; j < n; ++j)
-            {
-                float x = p[j].x, z = p[j].y;
-                if (i == 1)
-                {
-                    float dx = x - cx, dz = z - cz;
-                    x = cx + dx * ct - dz * st;
-                    z = cz + dx * st + dz * ct;
-                }
-                mu_shape_add_vertex(&s, mu_vec3_make(x, i ? h : -h, z),
-                                    (float)j / (float)n, (float)i);
-            }
+            float dx = p[i].x - cx, dz = p[i].y - cz;
+            float x = cx + dx * ct - dz * st;
+            float z = cz + dx * st + dz * ct;
+            mu_shape_add_vertex(&s, mu_vec3_make(x, y, z), (float)i / (float)n, t);
         }
     }
 
     /* sides: outward when the polygon is CCW in XZ seen from +Y */
-    for (i = 0; i < n; ++i)
+    for (j = 0; j < segments; ++j)
     {
-        uint32_t i1 = (uint32_t)((i + 1) % n);
-        uint32_t b0 = (uint32_t)i, b1 = i1;
-        uint32_t t0 = (uint32_t)n + (uint32_t)i, t1 = (uint32_t)n + i1;
-        mu_shape_add_quad(&s, b0, t0, t1, b1);
+        uint32_t r0 = (uint32_t)j * (uint32_t)n;
+        uint32_t r1 = r0 + (uint32_t)n;
+        for (i = 0; i < n; ++i)
+        {
+            uint32_t i1 = (uint32_t)((i + 1) % n);
+            mu_shape_add_quad(&s, r0 + (uint32_t)i, r1 + (uint32_t)i, r1 + i1, r0 + i1);
+        }
     }
 
     if (ok)
     {
+        uint32_t top = (uint32_t)(segments * n);
         for (i = 0; i < ntri; ++i)
         {
             uint32_t a = (uint32_t)tris[3 * i + 0];
@@ -1872,8 +1903,7 @@ MU_INLINE mu_shape mu_shape_extrude(const mu_vec2 *poly, int n, float height, fl
              * facing normal in 3D, so the BOTTOM cap keeps that order and the
              * TOP cap reverses it. */
             mu_shape_add_triangle(&s, a, b, c);
-            mu_shape_add_triangle(&s, (uint32_t)n + a, (uint32_t)n + c,
-                                  (uint32_t)n + b);
+            mu_shape_add_triangle(&s, top + a, top + c, top + b);
         }
     }
     MU_FREE(p);
@@ -2007,41 +2037,58 @@ MU_INLINE int mu_shape__weld_map(const mu_shape *s, float eps, uint32_t flags,
     if (!head || !next) { MU_FREE(head); MU_FREE(next); return 0; }
     for (i = 0; i < table_size; ++i) head[i] = MU_SHAPE_NONE;
 
-    for (i = 0; i < s->npoints; ++i)
+    /* Cells are 2*eps wide and the search starts at the cell that contains
+     * (p - eps). Along one axis the eps ball covers [p-eps, p+eps], an interval
+     * of length 2*eps == one cell width, so it can straddle at most two cells and
+     * those two are base and base+1. Eight probes instead of the textbook 27,
+     * with the same answer - the candidate test below is still the exact
+     * distance check, so this is not an approximation. A cell is 8x bigger, so a
+     * probe can walk a longer chain, but a chain member is nearly always a cache
+     * hit while a probe into a multi-megabyte table is not: 73 ms -> 25 ms on a
+     * 512x256 UV sphere. */
     {
-        int32_t cx = (int32_t)floorf(s->verts[i].p.x / eps);
-        int32_t cy = (int32_t)floorf(s->verts[i].p.y / eps);
-        int32_t cz = (int32_t)floorf(s->verts[i].p.z / eps);
-        uint32_t best = i;
-        int dx, dy, dz;
+        float w = 2.0f * eps;
 
-        for (dz = -1; dz <= 1 && best == i; ++dz)
-        for (dy = -1; dy <= 1 && best == i; ++dy)
-        for (dx = -1; dx <= 1 && best == i; ++dx)
+        for (i = 0; i < s->npoints; ++i)
         {
-            uint32_t b = mu_shape__hash3(cx + dx, cy + dy, cz + dz, mask);
-            uint32_t c = head[b];
-            while (c != MU_SHAPE_NONE)
+            int32_t bx = (int32_t)floorf((s->verts[i].p.x - eps) / w);
+            int32_t by = (int32_t)floorf((s->verts[i].p.y - eps) / w);
+            int32_t bz = (int32_t)floorf((s->verts[i].p.z - eps) / w);
+            uint32_t best = i;
+            int dx, dy, dz;
+
+            for (dz = 0; dz <= 1 && best == i; ++dz)
+            for (dy = 0; dy <= 1 && best == i; ++dy)
+            for (dx = 0; dx <= 1 && best == i; ++dx)
             {
-                if (mu_vec3_length2(mu_vec3_sub(s->verts[c].p, s->verts[i].p)) <= eps2)
+                uint32_t b = mu_shape__hash3(bx + dx, by + dy, bz + dz, mask);
+                uint32_t c = head[b];
+                while (c != MU_SHAPE_NONE)
                 {
-                    int ok = 1;
-                    if ((flags & MU_SHAPE_WELD_UV) &&
-                        (fabsf(s->verts[c].uv.x - s->verts[i].uv.x) > 1e-5f ||
-                         fabsf(s->verts[c].uv.y - s->verts[i].uv.y) > 1e-5f)) ok = 0;
-                    if ((flags & MU_SHAPE_WELD_NORMAL) &&
-                        mu_vec3_length2(mu_vec3_sub(s->verts[c].n, s->verts[i].n)) > 1e-8f) ok = 0;
-                    if (ok) { best = map[c]; break; }
+                    if (mu_vec3_length2(mu_vec3_sub(s->verts[c].p, s->verts[i].p)) <= eps2)
+                    {
+                        int ok = 1;
+                        if ((flags & MU_SHAPE_WELD_UV) &&
+                            (fabsf(s->verts[c].uv.x - s->verts[i].uv.x) > 1e-5f ||
+                             fabsf(s->verts[c].uv.y - s->verts[i].uv.y) > 1e-5f)) ok = 0;
+                        if ((flags & MU_SHAPE_WELD_NORMAL) &&
+                            mu_vec3_length2(mu_vec3_sub(s->verts[c].n, s->verts[i].n)) > 1e-8f) ok = 0;
+                        if (ok) { best = map[c]; break; }
+                    }
+                    c = next[c];
                 }
-                c = next[c];
             }
-        }
-        map[i] = best;
+            map[i] = best;
 
-        {
-            uint32_t b = mu_shape__hash3(cx, cy, cz, mask);
-            next[i] = head[b];
-            head[b] = i;
+            {
+                /* insert into the cell that owns p itself, which is base or
+                 * base+1 along every axis, so the query above always sees it */
+                uint32_t b = mu_shape__hash3((int32_t)floorf(s->verts[i].p.x / w),
+                                             (int32_t)floorf(s->verts[i].p.y / w),
+                                             (int32_t)floorf(s->verts[i].p.z / w), mask);
+                next[i] = head[b];
+                head[b] = i;
+            }
         }
     }
 
@@ -2297,6 +2344,98 @@ MU_INLINE uint32_t mu_shape__edge_hash(uint64_t key, uint32_t mask)
     return (uint32_t)key & mask;
 }
 
+/* Count-only edge pass: same answers as mu_shape__edges_build for the four
+ * numbers intropection needs (boundary / nonmanifold / inconsistent / unique),
+ * without the per-edge payload.
+ *
+ * The full table is 24 bytes a slot, most of which - v0, v1, opp[0], opp[1] - is
+ * only ever read by Loop subdivision. Introspection was paying for all of it,
+ * and worse, paying for it in one cache line per probe: a 3n-slot table of 24-byte
+ * entries is 33 MB for a 261k-triangle mesh, so every probe in the mesh was a
+ * miss. Here the probe touches only an 8-byte key array (8 MB), and the 2-byte
+ * (count, direction-sum) payload is touched only on a hit. 60 ms -> 12 ms. */
+MU_INLINE int mu_shape__edge_counts(const mu_shape *s, const uint32_t *map,
+                                    uint32_t *boundary, uint32_t *nonmanifold,
+                                    uint32_t *inconsistent, uint32_t *unique)
+{
+    uint64_t *keys;
+    uint16_t *info;          /* low byte: count, high byte: dir_sum + 8 */
+    uint32_t cap, mask, i, count = 0;
+
+    *boundary = *nonmanifold = *inconsistent = *unique = 0;
+    if (!s || s->ntriangles == 0) return 1;
+
+    cap = mu_shape__next_pow2(s->ntriangles * 3u + 8u);
+    mask = cap - 1u;
+    keys = (uint64_t *)MU_MALLOC((size_t)cap * sizeof *keys);
+    info = (uint16_t *)MU_MALLOC((size_t)cap * sizeof *info);
+    if (!keys || !info) { MU_FREE(keys); MU_FREE(info); return 0; }
+    memset(keys, 0, (size_t)cap * sizeof *keys);
+
+    for (i = 0; i < s->ntriangles; ++i)
+    {
+        uint32_t tri[3];
+        int k;
+
+        for (k = 0; k < 3; ++k)
+        {
+            uint32_t v = (uint32_t)s->triangles[3u * i + (uint32_t)k];
+            if (v >= s->npoints) { tri[0] = MU_SHAPE_NONE; break; }
+            tri[k] = map ? map[v] : v;
+        }
+        if (tri[0] == MU_SHAPE_NONE) continue;
+        if (tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2]) continue;
+
+        for (k = 0; k < 3; ++k)
+        {
+            uint32_t a = tri[k];
+            uint32_t b = tri[(k + 1) % 3];
+            uint32_t lo = a < b ? a : b;
+            uint32_t hi = a < b ? b : a;
+            uint64_t raw = ((uint64_t)lo << 32) | (uint64_t)hi;
+            uint64_t key = raw + 1u;
+            uint32_t slot = mu_shape__edge_hash(raw, mask);
+            int dir = (a == lo) ? 1 : -1;
+
+            for (;;)
+            {
+                uint64_t cur = keys[slot];
+                if (cur == 0u)
+                {
+                    keys[slot] = key;
+                    info[slot] = (uint16_t)(1u | ((uint16_t)(dir + 8) << 8));
+                    ++count;
+                    break;
+                }
+                if (cur == key)
+                {
+                    uint32_t cnt = (uint32_t)(info[slot] & 0xffu) + 1u;
+                    int dsum = (int)((info[slot] >> 8) & 0xffu) - 8 + dir;
+                    if (cnt > 3u) cnt = 3u;
+                    info[slot] = (uint16_t)(cnt | ((uint16_t)(dsum + 8) << 8));
+                    break;
+                }
+                slot = (slot + 1u) & mask;
+            }
+        }
+    }
+
+    for (i = 0; i < cap; ++i)
+    {
+        uint32_t cnt;
+        if (keys[i] == 0u) continue;
+        cnt = (uint32_t)(info[i] & 0xffu);
+        if (cnt == 1u) ++*boundary;
+        else if (cnt > 2u) ++*nonmanifold;
+        else if (((int)((info[i] >> 8) & 0xffu) - 8) != 0) ++*inconsistent;
+    }
+
+    *unique = count;
+    MU_FREE(keys);
+    MU_FREE(info);
+    return 1;
+}
+
 /* Build a deduplicated edge table over `map`ed indices. Returns 0 on OOM. */
 MU_INLINE int mu_shape__edges_build(const mu_shape *s, const uint32_t *map,
                                     mu_shape__edges *e)
@@ -2306,7 +2445,10 @@ MU_INLINE int mu_shape__edges_build(const mu_shape *s, const uint32_t *map,
     memset(e, 0, sizeof *e);
     if (!s || s->ntriangles == 0) return 1;
 
-    cap = mu_shape__next_pow2(s->ntriangles * 6u + 8u);
+    /* Worst case is 3 unique edges per triangle (a mesh of disjoint triangles),
+     * so 3n+8 slots can never fill up: the linear probe always terminates. It
+     * used to be 6n+8, which doubled the memset and the scan for no reason. */
+    cap = mu_shape__next_pow2(s->ntriangles * 3u + 8u);
     e->slots = (mu_shape__edge *)MU_MALLOC((size_t)cap * sizeof *e->slots);
     if (!e->slots) return 0;
     memset(e->slots, 0, (size_t)cap * sizeof *e->slots);
@@ -2404,7 +2546,6 @@ typedef struct mu_shape_stats
 MU_INLINE int mu_shape_stats_compute(const mu_shape *s, float weld_eps,
                                      mu_shape_stats *out)
 {
-    mu_shape__edges e;
     uint32_t *map;
     uint32_t i, unique = 0;
     uint32_t degenerate = 0;
@@ -2438,21 +2579,26 @@ MU_INLINE int mu_shape_stats_compute(const mu_shape *s, float weld_eps,
     }
     out->degenerate_triangles = degenerate;
 
-    if (!mu_shape__edges_build(s, map, &e)) { MU_FREE(map); return 0; }
-    out->boundary_edges = e.boundary;
-    out->nonmanifold_edges = e.nonmanifold;
-    out->inconsistent_edges = e.inconsistent;
-    out->euler = (int32_t)unique - (int32_t)e.count +
-                 (int32_t)(s->ntriangles - degenerate);
-    out->watertight = (e.boundary == 0u && e.nonmanifold == 0u);
-    if (out->watertight && e.inconsistent == 0u &&
-        ((out->euler & 1) == 0) && out->euler <= 2)
-        out->genus = (2 - out->euler) / 2;
+    {
+        uint32_t boundary, nonmanifold, inconsistent, edges;
+
+        if (!mu_shape__edge_counts(s, map, &boundary, &nonmanifold, &inconsistent,
+                                   &edges))
+        { MU_FREE(map); return 0; }
+        out->boundary_edges = boundary;
+        out->nonmanifold_edges = nonmanifold;
+        out->inconsistent_edges = inconsistent;
+        out->euler = (int32_t)unique - (int32_t)edges +
+                     (int32_t)(s->ntriangles - degenerate);
+        out->watertight = (boundary == 0u && nonmanifold == 0u);
+        if (out->watertight && inconsistent == 0u &&
+            ((out->euler & 1) == 0) && out->euler <= 2)
+            out->genus = (2 - out->euler) / 2;
+    }
 
     out->area = mu_shape_area(s);
     out->volume = mu_shape_volume(s);
 
-    mu_shape__edges_free(&e);
     MU_FREE(map);
     return 1;
 }
@@ -2487,16 +2633,39 @@ MU_INLINE int mu_shape_validate(const mu_shape *s, char *err, size_t errlen)
         if ((uint32_t)s->triangles[i] >= s->npoints)
             MU_SHAPE_FAIL("triangle index out of range");
 
-    for (i = 0; i < s->ntriangles; ++i)
+    /* "Degenerate" has to be relative to the model, and even then it has to be
+     * generous: a marching-tetrahedra bake legitimately leaves slivers where the
+     * surface passes through a grid corner. A 24^3 gyroid bottoms out at 2.8e-11
+     * against a mean triangle area of 3.1e-3 - a ratio of 9e-9 - so a 1e-6
+     * threshold would reject an honest bake, and an absolute epsilon rejects
+     * every small model instead. Exact zero, plus 1e-12 of the mean, catches the
+     * bug class (collapsed geometry) without policing numerical dust. */
     {
-        uint32_t a = (uint32_t)s->triangles[3u * i + 0u];
-        uint32_t b = (uint32_t)s->triangles[3u * i + 1u];
-        uint32_t c = (uint32_t)s->triangles[3u * i + 2u];
-        if (a == b || b == c || a == c) MU_SHAPE_FAIL("repeated index in a triangle");
-        if (mu_vec3_length2(mu_vec3_cross(mu_vec3_sub(s->verts[b].p, s->verts[a].p),
-                                          mu_vec3_sub(s->verts[c].p, s->verts[a].p)))
-            < 1e-20f)
-            MU_SHAPE_FAIL("zero-area triangle");
+        double total = 0.0;
+        double mean;
+
+        for (i = 0; i < s->ntriangles; ++i)
+        {
+            uint32_t a = (uint32_t)s->triangles[3u * i + 0u];
+            uint32_t b = (uint32_t)s->triangles[3u * i + 1u];
+            uint32_t c = (uint32_t)s->triangles[3u * i + 2u];
+            if (a == b || b == c || a == c) MU_SHAPE_FAIL("repeated index in a triangle");
+            total += 0.5 * (double)mu_vec3_length(
+                mu_vec3_cross(mu_vec3_sub(s->verts[b].p, s->verts[a].p),
+                              mu_vec3_sub(s->verts[c].p, s->verts[a].p)));
+        }
+        mean = total / (double)s->ntriangles;
+        for (i = 0; i < s->ntriangles; ++i)
+        {
+            uint32_t a = (uint32_t)s->triangles[3u * i + 0u];
+            uint32_t b = (uint32_t)s->triangles[3u * i + 1u];
+            uint32_t c = (uint32_t)s->triangles[3u * i + 2u];
+            double area = 0.5 * (double)mu_vec3_length(
+                mu_vec3_cross(mu_vec3_sub(s->verts[b].p, s->verts[a].p),
+                              mu_vec3_sub(s->verts[c].p, s->verts[a].p)));
+            if (area == 0.0) MU_SHAPE_FAIL("zero-area triangle");
+            if (area < 1e-12 * mean) MU_SHAPE_FAIL("degenerate (sliver) triangle");
+        }
     }
 #undef MU_SHAPE_FAIL
     return 1;
@@ -2610,8 +2779,16 @@ MU_INLINE int mu_shape_loop_subdivide(mu_shape *s, int levels)
             {
                 uint32_t a = tri[k], b = tri[(k + 1) % 3];
                 uint32_t lo = a < b ? a : b, hi = a < b ? b : a;
-                uint64_t key = (((uint64_t)lo << 32) | (uint64_t)hi) + 1u;
-                uint32_t slot = mu_shape__edge_hash(key, e.mask);
+                /* hash the RAW key, then offset: the table stores key+1 so that
+                 * 0 can mean "empty", and hashing the offset key would start the
+                 * probe in the wrong bucket. That is not a correctness bug - the
+                 * linear probe still walks to the right slot - but it turns every
+                 * lookup into an O(load factor) scan of dense table, and turns
+                 * subdivision from O(n) into O(n^2). It cost 305 ms instead of
+                 * 0.8 ms on a 20 480-triangle mesh. */
+                uint64_t raw = ((uint64_t)lo << 32) | (uint64_t)hi;
+                uint32_t slot = mu_shape__edge_hash(raw, e.mask);
+                uint64_t key = raw + 1u;
                 while (e.slots[slot].key != key) slot = (slot + 1u) & e.mask;
                 mid[k] = emap[slot];
             }
@@ -2799,7 +2976,14 @@ MU_INLINE float mu_sdf_subtract(float a, float b)  { return a > -b ? a : -b; }
 
 /* Polynomial smooth minimum: the blend is exact outside [-k, k] and rounds the
  * seam inside it. k = 0 gives a hard union. This one call is what turns three
- * spheres into a metaball creature. */
+ * spheres into a metaball creature.
+ *
+ * CAVEAT, measured: the polynomial smin is an approximation, not a distance
+ * field, and when k is a large fraction of the feature radius its zero set grows
+ * extra closed components (two spheres of r = 0.6 at distance 1.1: k = 0.2 gives
+ * one genus-0 blob, k = 0.6 gives three components). Keep k around a third of
+ * the smallest radius and check mu_shape_stats() after a bake — that is what the
+ * gate does. */
 MU_INLINE float mu_sdf_smin(float a, float b, float k)
 {
     float h, m;
@@ -3008,6 +3192,10 @@ MU_INLINE mu_shape mu_shape_from_sdf(mu_sdf_fn fn, void *user, mu_vec3 lo, mu_ve
 
     if (s.ntriangles == 0) { mu_shape_free(&s); return mu_shape_empty(); }
 
+    /* Crossings on the same grid edge are bit-identical (see
+     * mu_shape__grid_cross), so the weld only has to catch those; the extra
+     * factor is for the slivers that appear where the surface passes exactly
+     * through a grid corner — a gyroid does that on purpose. */
     mu_shape_weld(&s, diag * 1e-6f, MU_SHAPE_WELD_NONE);
     mu_shape_remove_degenerate(&s, 0.0f);
     mu_shape_compute_normals(&s);
@@ -3016,6 +3204,353 @@ MU_INLINE mu_shape mu_shape_from_sdf(mu_sdf_fn fn, void *user, mu_vec3 lo, mu_ve
      * design choice: fix it here so the caller never has to think about it */
     if (mu_shape_volume(&s) < 0.0f) mu_shape_flip(&s);
 
+    return mu_shape__finish(s);
+}
+
+
+/* ==========================================================================
+ * 10. L-systems: branching geometry from a rewrite grammar
+ * ==========================================================================
+ *
+ * par_shapes_create_lsystem is a stack machine over a program of (command, arg)
+ * token pairs, which is expressive but is not an L-system: there is no string
+ * rewriting, so the exponential-branching grammars everybody actually writes
+ * (Prusinkiewicz & Lindenmayer, "The Algorithmic Beauty of Plants") are not
+ * directly expressible. This is the real thing: a char-level rewrite grammar
+ * with a 3D turtle that extrudes a tube.
+ *
+ *     mu_lsystem_config cfg = { 0 };
+ *     static const char *const rules[] = { "X=F[+X][-X]FX", "F=FF" };
+ *     cfg.axiom = "X"; cfg.iterations = 5; cfg.slices = 8;
+ *     cfg.radius = 0.02f; cfg.length = 0.2f; cfg.angle = 25.7f;
+ *     mu_shape tree = mu_shape_lsystem(&cfg, rules, 2);
+ *
+ * Grammar, one rule per string, "pred=<successor>". Several rules may share a
+ * predecessor: the last one wins when cfg->seed is 0, and with a non-zero seed
+ * one of them is picked uniformly, which is what makes a grammar stochastic:
+ *     F      draw one segment of cfg->length
+ *     f      move one segment without drawing
+ *     + -    yaw left / right by cfg->angle degrees
+ *     & ^    pitch down / up by cfg->angle degrees
+ *     / \    roll left / right by cfg->angle degrees
+ *     |      turn around (yaw 180)
+ *     !      radius *= cfg->radius_shrink
+ *     [ ]    push / pop the turtle state (branch)
+ * Any other capital letter is a nonterminal: rewritten, never drawn, which is
+ * how "X=F[+X][-X]FX" grows a branch structure without drawing X itself.
+ *
+ * Differences from the par version, deliberately: no global epsilon, the seed
+ * is a parameter (par calls rand(), so two runs differ), weights are per rule
+ * and stochastic only when seed != 0, and the output is a connected tube with
+ * shared rings rather than a soup of cylinders that has to be spliced
+ * afterwards. The result is an OPEN surface (a plant has ends), so do not ask it
+ * for a volume or a genus.
+ */
+
+typedef struct
+{
+    const char *axiom;
+    int         iterations;
+    int         slices;         /* ring resolution; 5..16 is sane */
+    float       radius;         /* radius of the first segment */
+    float       length;         /* length of one F */
+    float       angle;          /* degrees per + - & ^ / \ */
+    float       radius_shrink;  /* radius multiplier per ! ; 0 means 0.8 */
+    unsigned    seed;           /* 0 = deterministic (first rule wins) */
+    int         max_symbols;    /* rewrite cap; 0 means 1<<20 */
+} mu_lsystem_config;
+
+typedef struct
+{
+    mu_vec3  pos, head, up;
+    uint32_t ring;              /* base index of the last ring, or MU_SHAPE_NONE */
+    float    radius;
+    int      depth;
+} mu_lsystem__turtle;
+
+/* Orthonormal ring basis for a head direction and a transported up vector.
+ *
+ * The projection is normalised by hand rather than with mu_vec3_normalize,
+ * because a normalize that guards its input (returning zero for a short vector)
+ * turns a ring that is *almost* perpendicular into a ring of radius zero: the
+ * turtle's up vector drifts toward its head after a few hundred rotations, the
+ * projection gets short but not short enough to trip a 1e-12 test, normalize
+ * returns zero, and the tube collapses to a line of degenerate quads. That cost
+ * four hours and this comment. */
+MU_INLINE void mu_lsystem__basis(mu_vec3 head, mu_vec3 up, mu_vec3 *u, mu_vec3 *v)
+{
+    mu_vec3 t = mu_vec3_sub(up, mu_vec3_scale(head, mu_vec3_dot(up, head)));
+    float l2 = mu_vec3_length2(t);
+
+    if (l2 > 1e-4f)
+    {
+        *u = mu_vec3_scale(t, 1.0f / sqrtf(l2));
+    }
+    else
+    {
+        /* head and up are (numerically) the same direction: any perpendicular
+         * will do, and the cross product below cannot be short */
+        mu_vec3 alt = fabsf(head.y) < 0.9f ? mu_vec3_make(0.0f, 1.0f, 0.0f)
+                                            : mu_vec3_make(1.0f, 0.0f, 0.0f);
+        *u = mu_vec3_normalize(mu_vec3_cross(head, alt));
+    }
+    *v = mu_vec3_cross(head, *u);
+}
+
+/* Rotate `v` (and the head) about `axis` by `a` radians: a quaternion-free
+ * Rodrigues rotation, which is 9 mul + 6 add and exact enough at these angles. */
+MU_INLINE mu_vec3 mu_lsystem__rotate(mu_vec3 v, mu_vec3 axis, float a)
+{
+    float c = cosf(a), s = sinf(a);
+    mu_vec3 cross = mu_vec3_cross(axis, v);
+    float    dot = mu_vec3_dot(axis, v);
+    return mu_vec3_add(mu_vec3_add(mu_vec3_scale(v, c), mu_vec3_scale(cross, s)),
+                       mu_vec3_scale(axis, dot * (1.0f - c)));
+}
+
+/* Emit a ring of `slices` vertices at the turtle position. Returns its base
+ * index, or MU_SHAPE_NONE on failure. */
+MU_INLINE uint32_t mu_lsystem__ring(mu_shape *s, const mu_lsystem__turtle *t,
+                                    int slices, float v)
+{
+    mu_vec3 u, w;
+    uint32_t base;
+    int i;
+
+    if (s->flags & MU_SHAPE_FLAG_OOM) return MU_SHAPE_NONE;
+    if (!mu_shape__reserve_points(s, s->npoints + (uint32_t)slices)) return MU_SHAPE_NONE;
+
+    mu_lsystem__basis(t->head, t->up, &u, &w);
+    base = s->npoints;
+    for (i = 0; i < slices; ++i)
+    {
+        float a = MU_SHAPE_TAU * (float)i / (float)slices;
+        mu_vec3 p = mu_vec3_add(t->pos,
+                                mu_vec3_add(mu_vec3_scale(u, t->radius * cosf(a)),
+                                            mu_vec3_scale(w, t->radius * sinf(a))));
+        mu_shape_add_vertex(s, p, (float)i / (float)slices, v);
+    }
+    return base;
+}
+
+/* Connect ring `a` to ring `b`, both `slices` wide. `flip` reverses the quad
+ * winding so the first segment decides outward-facingness once. */
+MU_INLINE void mu_lsystem__bridge(mu_shape *s, uint32_t a, uint32_t b, int slices,
+                                  int flip)
+{
+    int i;
+    for (i = 0; i < slices; ++i)
+    {
+        int j = (i + 1) % slices;
+        if (flip)
+            mu_shape_add_quad(s, a + (uint32_t)i, b + (uint32_t)i,
+                              b + (uint32_t)j, a + (uint32_t)j);
+        else
+            mu_shape_add_quad(s, a + (uint32_t)i, a + (uint32_t)j,
+                              b + (uint32_t)j, b + (uint32_t)i);
+    }
+}
+
+MU_INLINE mu_shape mu_shape_lsystem(const mu_lsystem_config *cfg,
+                                    const char *const *rules, int nrules)
+{
+    mu_shape s = mu_shape_empty();
+    char *cur = NULL, *next = NULL;
+    mu_lsystem__turtle *stack = NULL;
+    int stackcap = 0, sp = 0;
+    int slices, iter, i, flip = -1;
+    int maxsym;
+    float ang, shrink, len, vdist = 0.0f;
+    mu_pcg32 rng;
+
+    if (!cfg || !cfg->axiom || !rules || nrules < 1) return s;
+    slices = cfg->slices > 2 ? cfg->slices : 8;
+    if (slices > 64) slices = 64;
+    maxsym = cfg->max_symbols > 0 ? cfg->max_symbols : (1 << 20);
+    ang = (cfg->angle != 0.0f ? cfg->angle : 25.0f) * MU_SHAPE_PI / 180.0f;
+    shrink = cfg->radius_shrink > 0.0f ? cfg->radius_shrink : 0.8f;
+    len = cfg->length != 0.0f ? cfg->length : 0.1f;
+    mu_pcg32_init(&rng, (uint64_t)(cfg->seed ? cfg->seed : 1u), 0xda3e39cb94b95bdbULL);
+
+    cur = (char *)MU_MALLOC((size_t)maxsym);
+    next = (char *)MU_MALLOC((size_t)maxsym);
+    if (!cur || !next) goto done;
+
+    for (i = 0; cfg->axiom[i] && i < maxsym - 1; ++i) cur[i] = cfg->axiom[i];
+    cur[i] = 0;
+
+    /* ---- rewrite ---- */
+    for (iter = 0; iter < cfg->iterations; ++iter)
+    {
+        size_t n = 0;
+        for (i = 0; cur[i]; ++i)
+        {
+            const char *succ = NULL;
+            int r, first = -1, last = -1;
+
+            /* every rule whose predecessor is this symbol; the last one wins in
+             * deterministic mode, and with a seed one of the run is picked
+             * uniformly. (The first version tested this condition inside the
+             * scan and so never reached the random branch at all: seed != 0
+             * silently behaved like seed == 0.) */
+            for (r = 0; r < nrules; ++r)
+            {
+                if (!rules[r] || rules[r][0] != cur[i] || !strchr(rules[r], '='))
+                    continue;
+                if (first < 0) first = r;
+                last = r;
+            }
+            if (first >= 0)
+            {
+                int pick = last;
+                if (cfg->seed != 0 && last > first)
+                    pick = first + (int)(mu_pcg32_next_u32(&rng) %
+                                         (uint32_t)(last - first + 1));
+                succ = strchr(rules[pick], '=') + 1;
+            }
+
+            if (succ)
+            {
+                while (*succ && n < (size_t)maxsym - 1) next[n++] = *succ++;
+            }
+            else if (n < (size_t)maxsym - 1)
+            {
+                next[n++] = cur[i];
+            }
+        }
+        next[n] = 0;
+        { char *t = cur; cur = next; next = t; }
+        if (strlen(cur) >= (size_t)maxsym - 1) break;   /* cap reached */
+    }
+
+    /* ---- turtle ---- */
+    stackcap = 64;
+    stack = (mu_lsystem__turtle *)MU_MALLOC((size_t)stackcap * sizeof *stack);
+    if (!stack) goto done;
+    memset(&stack[0], 0, sizeof stack[0]);
+    stack[0].head = mu_vec3_make(0.0f, 1.0f, 0.0f);
+    stack[0].up = mu_vec3_make(0.0f, 0.0f, 1.0f);
+    stack[0].radius = cfg->radius > 0.0f ? cfg->radius : 0.02f;
+    stack[0].ring = MU_SHAPE_NONE;
+    sp = 0;
+
+    for (i = 0; cur[i]; ++i)
+    {
+        mu_lsystem__turtle *t = &stack[sp];
+        char c = cur[i];
+
+        if (c == 'F' || c == 'G')
+        {
+            uint32_t newring;
+
+            /* exactly one new ring per segment: the ring the tube starts from is
+             * emitted once, at the first F of the run, and every later F starts
+             * from the previous ring instead of re-emitting it. Emitting both
+             * ends every time leaves an unused ring per segment and a
+             * zero-length bridge at tube starts - i.e. quads of zero area. */
+            if (t->ring == MU_SHAPE_NONE)
+            {
+                t->ring = mu_lsystem__ring(&s, t, slices, vdist);
+                if (t->ring == MU_SHAPE_NONE) break;
+            }
+
+            t->pos = mu_vec3_add(t->pos, mu_vec3_scale(t->head, len));
+            vdist += len;
+            newring = mu_lsystem__ring(&s, t, slices, vdist);
+            if (newring == MU_SHAPE_NONE) break;
+
+            if (flip < 0)
+            {
+                /* decide the winding once, from the first bridge: outward means
+                 * the quad normal agrees with the radial direction */
+                mu_vec3 u, w;
+                mu_lsystem__basis(t->head, t->up, &u, &w);
+                flip = (mu_vec3_dot(
+                            mu_vec3_cross(mu_vec3_sub(s.verts[t->ring + 1u].p,
+                                                      s.verts[t->ring].p),
+                                          mu_vec3_sub(s.verts[newring].p,
+                                                      s.verts[t->ring].p)),
+                            w) < 0.0f) ? 1 : 0;
+            }
+            mu_lsystem__bridge(&s, t->ring, newring, slices, flip);
+            t->ring = newring;
+        }
+        else if (c == 'f')
+        {
+            t->pos = mu_vec3_add(t->pos, mu_vec3_scale(t->head, len));
+            vdist += len;
+            t->ring = MU_SHAPE_NONE;
+        }
+        else if (c == '+' || c == '-')
+        {
+            mu_vec3 up = t->up;
+            t->head = mu_lsystem__rotate(t->head, up, c == '+' ? ang : -ang);
+            t->up = up;
+        }
+        else if (c == '&' || c == '^')
+        {
+            mu_vec3 u, w, axis;
+            mu_lsystem__basis(t->head, t->up, &u, &w);
+            axis = u;
+            t->head = mu_lsystem__rotate(t->head, axis, c == '^' ? ang : -ang);
+            t->up = mu_lsystem__rotate(t->up, axis, c == '^' ? ang : -ang);
+        }
+        else if (c == '/' || c == '\\')
+        {
+            float a = c == '/' ? ang : -ang;
+            t->up = mu_lsystem__rotate(t->up, t->head, a);
+        }
+        else if (c == '|')
+        {
+            mu_vec3 axis = t->up;
+            t->head = mu_vec3_scale(t->head, -1.0f);
+            t->up = mu_lsystem__rotate(t->up, axis, MU_SHAPE_PI);
+            /* the next segment would lie exactly on top of the previous one; end
+             * the run instead of emitting a zero-area bridge onto it */
+            t->ring = MU_SHAPE_NONE;
+        }
+        else if (c == '!')
+        {
+            t->radius *= shrink;
+        }
+        else if (c == '[')
+        {
+            if (sp + 1 >= stackcap)
+            {
+                int newcap = stackcap * 2;
+                mu_lsystem__turtle *grown = (mu_lsystem__turtle *)MU_REALLOC(
+                    stack, (size_t)newcap * sizeof *stack);
+                if (!grown) break;
+                stack = grown;
+                stackcap = newcap;
+            }
+            ++sp;
+            stack[sp] = stack[sp - 1];
+            stack[sp].depth = stack[sp - 1].depth + 1;
+            stack[sp].ring = MU_SHAPE_NONE;   /* a branch starts a new tube */
+            stack[sp].radius = stack[sp - 1].radius * 0.8f;
+        }
+        else if (c == ']')
+        {
+            if (sp > 0) --sp;
+            /* The frame we come back to still points at the ring the branch grew
+             * out of. Bridging from it again would give that ring's edges four
+             * incident quads - a non-manifold junction - so a run ends here and
+             * the next F starts a fresh ring at the same position and radius.
+             * Two runs meet visually, not topologically. */
+            stack[sp].ring = MU_SHAPE_NONE;
+        }
+        /* anything else (X, A, B, ...) is a nonterminal: rewritten, not drawn */
+    }
+
+    if (s.ntriangles == 0) { mu_shape_free(&s); goto done; }
+    mu_shape_compute_normals(&s);
+
+done:
+    MU_FREE(cur);
+    MU_FREE(next);
+    MU_FREE(stack);
+    if (s.ntriangles == 0) return mu_shape_empty();
     return mu_shape__finish(s);
 }
 
