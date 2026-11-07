@@ -1,0 +1,111 @@
+suite,case,variant,ns_per_op,cyc_per_op,speedup,checksum
+memory_cache,aos_vs_soa,"Bloated OOP AoS (256B + alive if)",9.9434,20.875,1.000,1078036792
+memory_cache,aos_vs_soa,"Hot/Cold Split AoS (24B dense)",1.5523,3.256,6.406,1078036792
+memory_cache,aos_vs_soa,"Aligned SoA + AVX2 FMA (6 streams)",0.8879,1.860,11.199,1078036792
+memory_cache,aosoa_packets,"AoS 48B Strided Fields",6.9520,14.597,1.000,756548
+memory_cache,aosoa_packets,"AoSoA8 (float x[8],y[8]...) AVX2",1.9305,4.052,3.601,756548
+memory_cache,ptr_vs_csr,"Pointer-Chased Adjacency (Heap Nodes)",8.9251,18.739,1.000,145902741554
+memory_cache,ptr_vs_csr,"Contiguous CSR Flat Arrays (mu_csr)",0.2590,0.543,34.462,145902741554
+memory_cache,existence_1pct,"Dense bool[1M] Scan + Branch",0.9249,1.941,1.000,548269
+memory_cache,existence_1pct,"Bitset + __builtin_ctzll Word-Skip",0.0898,0.188,10.302,548269
+memory_cache,existence_1pct,"Existence Dense Damaged[] Table",0.0071,0.015,129.852,548269
+memory_cache,morton_2d,"Row-Major RGBA32F (64KB Row Stride)",16.6624,34.982,1.000,981741
+memory_cache,morton_2d,"Morton Z-Order + ryg Dilated +1 (64B 2x2)",10.8212,22.712,1.540,981741
+memory_cache,stlf_hazard,"2x uint32 Store -> uint64 Load (STLF Stall)",7.5271,15.806,1.000,18023194600407041
+memory_cache,stlf_hazard,"Combined Register Pack -> uint64 Store/Load",1.7965,3.772,4.190,18023194600407041
+memory_cache,magic_ring,"Modulo Split-Check + Scratch Copy",3.2590,6.844,1.000,18446744073705357312
+memory_cache,magic_ring,"Double-Mapped Magic VM Ring (Zero-Copy)",1.1684,2.453,2.789,18446744073705357312
+memory_cache,nt_cache_pollution,"Hot Query After Normal _mm256_store_ps",0.8868,1.858,1.000,13948806262039293765
+memory_cache,nt_cache_pollution,"Hot Query After Streaming _mm256_stream_ps",0.5390,1.123,1.645,13948806262039293765
+memory_cache,arena_vs_malloc,"glibc malloc(48) + free() per object",12.8189,26.918,1.000,137438691328
+memory_cache,arena_vs_malloc,"Frame Bump Arena + O(1) Cursor Rewind",2.1084,4.427,6.080,137438691328
+branch_ilp_alu,polymorphism,"OOP Virtual Call (vptr[] shuffled)",10.2978,21.618,1.000,17214
+branch_ilp_alu,polymorphism,"Flat Struct + switch(type) (shuffled)",7.6764,16.114,1.341,17214
+branch_ilp_alu,polymorphism,"DOD Split Tables per Type + AVX2",0.1732,0.362,59.455,17214
+branch_ilp_alu,branch_50_50,"Random 50/50 Branch (Mispredict Storm)",4.9794,10.456,1.000,50255160
+branch_ilp_alu,branch_50_50,"Same Branch on Pre-Sorted Data",0.5212,1.094,9.554,50255160
+branch_ilp_alu,branch_50_50,"Branchless Bit-Mask on Unsorted Data",0.3534,0.741,14.090,50255160
+branch_ilp_alu,branch_50_50,"AVX2 vpcmpgtd + vpand on Unsorted Data",0.1400,0.293,35.579,50255160
+branch_ilp_alu,ilp_dot,"1 Scalar Accumulator (Serial 4-cyc FMA)",0.6957,1.461,1.000,712466
+branch_ilp_alu,ilp_dot,"4 Independent Scalar Accumulators (ILP)",0.2785,0.585,2.498,712467
+branch_ilp_alu,ilp_dot,"8 Independent AVX2 FMA Accumulators",0.0337,0.071,20.642,712466
+branch_ilp_alu,horner_vs_estrin,"Horner's Rule (Depth 7 = 28 cyc FMA)",11.3384,23.810,1.000,639908
+branch_ilp_alu,horner_vs_estrin,"Estrin's Scheme (Depth 3 Tree FMA)",6.3908,13.420,1.774,639908
+branch_ilp_alu,fastmod,"Hardware x % d (x86 divl)",2.1257,4.463,1.000,10491882677
+branch_ilp_alu,fastmod,"Lemire fastmod (Exact x % d, 0 div!)",0.6891,1.446,3.085,10491882677
+branch_ilp_alu,fastmod,"Lemire fastrange32 ((u64)x * d >> 32)",0.1686,0.354,12.606,10492294177
+branch_ilp_alu,rsqrt,"Scalar 1.0f / sqrtf(x) (vsqrtss+vdivss)",2.1320,4.475,1.000,12398
+branch_ilp_alu,rsqrt,"Quake III 0x5f3759df (GPR<->XMM transfer)",1.3360,2.804,1.596,12398
+branch_ilp_alu,rsqrt,"AVX2 _mm256_rsqrt_ps + 1 FMA NR (~23-bit)",0.2905,0.609,7.338,12398
+branch_ilp_alu,ryg_bitstream,"Classic while(bitcnt < w) Byte Refill",5.4967,11.542,1.000,4581922307
+branch_ilp_alu,ryg_bitstream,"Fabian Giesen Branchless 64-bit Refill",1.1524,2.420,4.770,4581922307
+branch_ilp_alu,linux_hlist,"Nullable {head,tail} (16B hdr + 3 ifs)",12.4424,26.128,1.000,1090092465
+branch_ilp_alu,linux_hlist,"Linux Kernel hlist_node (**pprev, 8B hdr)",7.9557,16.706,1.564,1090092465
+simd_avx,frustum_cull,"AoS Scalar + Plane Early-Out Branch",16.3081,34.243,1.000,33213
+simd_avx,frustum_cull,"Frostbite SoA + Prebound P-Vtx AVX2",0.8315,1.744,19.613,33213
+simd_avx,vpshufb_lut,"Scalar 10-Char Comparison Chain",0.8669,1.820,1.000,998643
+simd_avx,vpshufb_lut,"Lemire AVX2 vpshufb 2-Nibble LUT (32B)",0.0425,0.089,20.388,998643
+simd_avx,pclmul_quotes,"Scalar Stateful Loop (in_quote flip)",1.1461,2.407,1.000,262144
+simd_avx,pclmul_quotes,"AVX2 + PCLMULQDQ 64-Byte Prefix-XOR",0.0441,0.092,26.000,262144
+simd_avx,stream_compact,"Scalar if(x > thresh) out[pos++]=x",4.7848,10.046,1.000,526178
+simd_avx,stream_compact,"AVX2 vpermd 256-LUT Left-Pack (simdprune)",0.2083,0.437,22.967,526178
+simd_avx,stream_compact,"AVX-512 Hardware vpcompressd (16-wide)",0.2216,0.465,21.591,526178
+simd_avx,parse_digits,"Scalar v = v*10 + (s[k]-'0') Loop",2.0536,4.311,1.000,52348589668291
+simd_avx,parse_digits,"Lemire 64-bit SWAR (3 Multiplies)",1.2924,2.713,1.589,52348589668291
+simd_avx,parse_digits,"Lemire AVX2 vpmaddubsw+vpmaddwd (4x8)",0.3881,0.814,5.291,52348589668291
+simd_avx,popcount,"Scalar 256-Byte Lookup Table",0.3338,0.700,1.000,2096985
+simd_avx,popcount,"4x Unrolled Scalar Hardware popcntq",0.0428,0.089,7.799,2096985
+simd_avx,popcount,"Mula-Kurz-Lemire AVX2 vpshufb+vpsadbw",0.0278,0.058,11.999,2096985
+simd_avx,popcount,"AVX-512 Hardware vpopcntq (1024b/iter)",0.0149,0.031,22.386,2096985
+simd_avx,transpose_8x8,"Scalar Strided 8x8 Transpose",0.2917,0.613,1.000,326
+simd_avx,transpose_8x8,"In-Register AVX2 8x8 Shuffle Transpose",0.0980,0.206,2.977,326
+highperf_ds,hash_lookup,"Chained Heap Nodes (std::unordered_map)",17.5946,36.943,1.000,329983389806
+highperf_ds,hash_lookup,"unordered_dense + AVX2 32-Slot H2 Probe",9.3754,19.686,1.877,329983389806
+highperf_ds,hash_lookup,"Flat AVX2 SwissTable (32-Way H2 Ctrl)",7.1251,14.961,2.469,329983389806
+highperf_ds,hash_iter,"Chained Bucket+Node Walk",15.8139,33.204,1.000,453601260000
+highperf_ds,hash_iter,"unordered_dense Contiguous dense_vals[]",0.2597,0.544,60.900,453601260000
+highperf_ds,static_search,"Standard Branchy lower_bound (22 hops)",320.5998,673.245,1.000,1646293693664
+highperf_ds,static_search,"Branchless CMOV Binary Search",332.5244,698.286,0.964,1646293693664
+highperf_ds,static_search,"Eytzinger BFS Layout + 4-Level Prefetch",72.0115,151.212,4.452,1646293693664
+highperf_ds,static_search,"16-ary Cache-Line AVX2 S-Tree (6 hops!)",45.0316,94.556,7.119,1646293693664
+highperf_ds,bloom_filter,"Classic 6-Probe Bloom (Up to 6 Lines)",11.2226,23.566,1.000,524789
+highperf_ds,bloom_filter,"AVX2 Split-Block Bloom (1 Line, vptest)",3.1691,6.654,3.541,524997
+highperf_ds,hier_bitset,"Flat uint64[262K] Scan (2 MB per pass)",172856.2031,362980.836,1.000,2024601400
+highperf_ds,hier_bitset,"4-Level Summary HierBitset (O(active)!)",533.6328,1119.812,323.923,2024601400
+highperf_ds,radix_sort,"libc qsort() (Indirect Compare + Branch)",132.1667,277.543,1.000,6443559784
+highperf_ds,radix_sort,"1-Scan Histogram + 4-Pass LSD Radix Sort",13.0347,27.369,10.140,6443559784
+highperf_ds,small_vector,"std::vector Style (Heap malloc/free)",24.1104,50.631,1.000,693275976804
+highperf_ds,small_vector,"LLVM SmallVector<u32, 8> (mu_small_vec)",15.2951,32.118,1.576,693275976804
+advanced_c_isa,gemm_tiling,"Naive i-j-k (Strided B + 1 Accum)",0.6100,1.281,1.000,43048
+advanced_c_isa,gemm_tiling,"Loop-Interchanged i-k-j (2 Lines Swapped)",0.0304,0.064,20.072,43048
+advanced_c_isa,gemm_tiling,"L1-Tiled + 4x16 AVX2 FMA Micro-Kernel",0.0138,0.029,44.133,43048
+advanced_c_isa,fast_hashing,"Scalar FNV-1a (Serial 1B/3-cyc mul)",1.3958,2.931,1.000,2014433577
+advanced_c_isa,fast_hashing,"Hardware SSE4.2 CRC32C (3-Lane ILP)",0.0432,0.091,32.275,2219958641
+advanced_c_isa,fast_hashing,"wyhash 128-Bit Multiply-Mix (2-Lane)",0.0673,0.141,20.746,2133024944
+advanced_c_isa,fast_hashing,"Hardware AES-NI _mm_aesenc (4-Lane)",0.0182,0.038,76.592,2323257979
+advanced_c_isa,streamvbyte,"Protobuf LEB128 (0x80 Branch / Byte)",7.7456,16.265,1.000,35324678573115
+advanced_c_isa,streamvbyte,"Lemire StreamVByte (2b Ctrl + pshufb)",0.1763,0.370,43.925,35324678573115
+advanced_c_isa,vm_dispatch,"while + switch(*ip++) (1 Shared BTB)",5.8283,12.239,1.000,16740302752834179750
+advanced_c_isa,vm_dispatch,"Computed goto *table[*ip++] (-fno-gcse)",5.3059,11.141,1.098,16740302752834179750
+advanced_c_isa,xor8_filter,"Classic 8-Probe Bloom (2.0 MB, Branchy)",13.3992,28.136,1.000,524561
+advanced_c_isa,xor8_filter,"Lemire Static Xor8 (1.23 MB, 3 MLP Loads)",3.9227,8.237,3.416,526319
+advanced_c_isa,gfni_bitmatrix,"Scalar 3-Stage Shift/Mask Bit-Reverse",1.0610,2.228,1.000,334
+advanced_c_isa,gfni_bitmatrix,"AVX2 2-Nibble vpshufb Bit-Reverse",0.0248,0.052,42.839,334
+advanced_c_isa,gfni_bitmatrix,"GFNI vgf2p8affineqb (64B / 1 Instr!)",0.0114,0.024,93.203,334
+advanced_c_isa,simd_dfa_compose,"Table DFA state = dfa[state][c]",2.4284,5.098,1.000,2
+advanced_c_isa,simd_dfa_compose,"4-Stream Associative pshufb DFA",0.2748,0.577,8.837,2
+advanced_c_isa,roaring_bitmap,"Sorted uint32[] Two-Pointer Merge",3.1172,6.545,1.000,16602
+advanced_c_isa,roaring_bitmap,"Roaring Hybrid (8KB Bitset + u16 Array)",0.0149,0.031,209.445,16602
+mylib_upgrade,mu_radix_sort_u64_262k,40.987,21.591,1.90
+mylib_upgrade,mu_radix_sort_f32_vs_qsort,144.264,7.729,18.67
+mylib_upgrade,mu_bitset_intersection_count_vs_popcntq,29.440,11.510,2.56
+mylib_upgrade,mu_hash32_fastrange_upgrade,37.118,20.782,1.79
+mylib_upgrade,mu_swiss_map_vs_legacy_hash32,37.118,5.761,6.44
+mylib_upgrade,mu_dense_map_iter_vs_sparse,364.900,2.048,178.17
+mylib_upgrade,mu_eytzinger_u32_vs_bsearch,185.767,73.781,2.52
+mylib_upgrade,mu_stree16_i32_vs_bsearch,185.767,37.255,4.99
+mylib_upgrade,mu_bloom_simd256_vs_classic,20.283,2.440,8.31
+mylib_upgrade,mu_xor8_vs_classic_bloom,20.283,3.776,5.37
+mylib_upgrade,mu_four_heap_vs_binary_heap,133.217,59.194,2.25
+mylib_upgrade,mu_timer_wheel_vs_heap,133.217,8.639,15.42
+mylib_upgrade,mu_hash_bytes_fast_vs_fnv1a,90419.000,1208.000,74.85

@@ -1,0 +1,2910 @@
+================================================================================
+DOD NOTES
+A working summary of Data-Oriented Design for C programmers
+================================================================================
+
+Sources distilled here:
+  * Richard Fabian, "Data-Oriented Design" (dodbook/ — the full online book)
+  * Mike Acton (CppCon 2014), Casey Muratori ("Performance-Aware Programming"),
+    Agner Fog (x86 Microarchitecture & Optimization), Fabian Giesen (ryg / RAD)
+  * Daniel Lemire (SIMD, bitsets, fastmod, simdjson, simdprune, Xor filters) &
+    Sergey Slotin's Algorithmica "Algorithms for Modern Hardware"
+  * usamahz/cpu-performance-engineering (304 primary-source papers & manuals,
+    14 reproducible C benchmarks, the Seven-Field evidence rule, Top-Down TMA
+    thresholds, Roofline/CARM/ECM/USL/Queueing models & deterministic triage)
+  * intel/intel-performance-skills (structured Linux `perf` workflows, assembly
+    `perf annotate` pattern scans, PMU/GCC branch probability verification,
+    Zipper SIMD width upconversion, Corsix `VPCLMULQDQ+CRC32C` fusion, runtime
+    CPU dispatch rules, `x86-simd-sort`, dual-profile core scaling & `perf c2c`
+    / CV thundering-herd / `osq_lock` / per-CPU stats patterns)
+  * Production engines & systems: Mesa 3D (NIR / Gallium), Linux Kernel (Maple
+    Tree, XArray, SLUB, seqlock, kfifo, hlist, io_uring, resctrl), EA Frostbite,
+    Naughty Dog, Valve (Migdalskiy & Christer Ericson), id Software, Intel
+    (ISPC / Embree / MoonRay), LLVM (ADT), Abseil SwissTable, Ankerl, TCMalloc
+  * the repository C style contract (AGENTS.md) & empirical proofs (perf_test/)
+  * the `mylib` (`mu`) 70-header C data-structure library (mu/*.h)
+
+How to use these notes:
+  Read part by part. Each part ends with the short version. The companion
+  AGENTS.md is the prescriptive rulebook; this file explains the why; runnable
+  hardware proofs live in perf_test/PERF_PROOFS.md. Loadable skills live at
+  .agents/skills/{dod-performance,simd-hardware-c,game-engine-dod,multithreading-dod}/.
+  Single-core hardware/DOD/SIMD/DS/Models/Benchmarking (Parts 0–22) is strictly
+  separated from Multithreading, NUMA, OS & Tail Latency (Appendix M at the end).
+  "mu:" marks the mylib primitive that implements an idea.
+
+================================================================================
+PART 0 — THE ONE IDEA
+================================================================================
+
+Program = data + transformation.
+
+    stop organizing memory around objects
+    organize it around the operations that consume the data
+
+The mechanical version:
+
+    struct Someone { something }      ->      something[someone_id]
+
+Objects are a way of naming things. The CPU does not care about your nouns; it
+cares about bytes arriving from memory without stalling. So the question that
+drives every decision is:
+
+    "What data does this operation actually need, and how can I arrange that
+     data so the machine can process it efficiently?"
+
+Three questions, asked constantly:
+
+    1. What data exists?
+    2. What transformations operate on it?
+    3. How should that data be stored for those transformations?
+
+Performance model:
+
+    performance ~= computation
+                 + memory traffic
+                 + cache behaviour
+                 + branch behaviour
+                 + synchronization
+
+and the single most important principle:
+
+    REDUCE UNNECESSARY DEPENDENCIES.
+    fewer dependent instructions, fewer pointer hops, fewer unpredictable
+    branches, fewer random writes, fewer cache-polluting accesses.
+
+Caveat attached to every rule in this document: measure. Every technique here
+has a workload where it loses. The DOD book itself says the amount of
+normalization (and by extension most of this) is guided by experiment and
+experience.
+
+--------------------------------------------------------------------------------
+
+Two mindsets:
+
+    OOP                                     DOD
+    ---                                     ---
+    WHAT is this object?                    WHAT DATA exists?
+    What does it own?                       What TRANSFORMS operate on it?
+    What methods does it have?              Which data needs each transform?
+    Who calls those methods?                How should that data be stored?
+
+The recurring transformation:
+
+    MONOLITHIC OBJECT
+        -> explode into elements
+        -> identify data + dependencies
+        -> components / tables
+        -> systems / transforms
+        -> process only active data
+
+The deepest recurring transformation:
+
+    "What am I?"    ->    "What processing am I currently eligible for?"
+
+And the warning from the book's harm chapter: the OOP habit that hurts most is
+organizing data by ownership/lifetime/category when the machine wants it
+organized by processing.
+
+
+================================================================================
+PART 1 — DATA AND THE PROBLEM DOMAIN
+================================================================================
+
+1.1 One thing has many representations
+
+A single real-world thing usually needs several different data
+representations, each for a different consumer:
+
+                        REAL WORLD
+                            |
+                          Banana
+                            |
+             +--------------+--------------+
+             v              v              v
+         Inventory      Nutrition       Legal
+          quantity       calories       tariff
+          supplier       nutrients      origin
+          price          weight         category
+
+The problem domain ("banana") stays in the design model. The implementation
+organizes data by transformation, access pattern, lifetime and hardware
+requirements. Do not force one representation to serve every consumer.
+
+Game assets show this clearly:
+
+    GAME DATA
+        |
+    +---+------------+-------------+
+    v                v             v
+  Texture          Mesh        Animation
+    |                |             |
+  formats        layouts    representations
+    +----------------+-------------+
+                     |
+                 TOOLCHAIN  (import / convert)
+                     |
+                RUNTIME DATA
+                     |
+        +------------+------------+
+        v            v            v
+    Rendering     Physics        AI
+    GPU layout   collision    simulation
+        +------------+------------+
+                     |
+               TRANSFORMATIONS
+                     |
+                  OUTPUT
+
+A mesh alone may have multiple representations:
+
+    Mesh
+     +-- Position buffer
+     +-- Normal buffer
+     +-- UV buffer
+     +-- Tangent buffer
+     +-- Index buffer
+     +-- Skin weights
+     +-- Bone indices
+
+    Editor:    source + render + physics + raycast
+    Shipping:  render + physics
+    GPU:       render only (compressed positions, packed normals,
+               optimized vertex order, GPU-friendly layout)
+
+And each may have its own layout: render wants packed/interleaved; physics
+wants contiguous positions; pathfinding wants a grid. Cache derived data in
+the asset pipeline so the runtime does not recompute it.
+
+1.2 Don't organize by noun; organize by processing
+
+    "Don't organize data because it belongs to the same noun.
+     Organize it because it is processed together."
+
+    A design with 20 tiny, independent arrays can be easier to reason about
+    than one 200-field object.
+
+1.3 Data should be grouped by access pattern, relationship and lifetime
+
+A player account, a character instance, an inventory and achievements may all
+refer to the same player but should not necessarily share storage or lifetime.
+Group by:
+    - access pattern (what reads/writes it, how often, together or apart)
+    - relationships (what it must be joined with)
+    - lifetime (per frame, per level, permanent)
+
+1.4 Normalization to remove coupling
+
+There is a genuine conceptual overlap between relational normalization and DOD:
+both separate independent pieces of information so they can be processed (or
+updated) independently. DOD then goes further and re-layouts by access pattern
+(SoA / columnar) for cache, SIMD and bandwidth.
+
+    1NF   each field is a single atomic value (not a list/set/collection)
+    2NF   remove partial dependencies on part of a composite key
+    3NF   remove transitive dependencies (A -> B -> C)
+    BCNF  every non-trivial dependency X -> Y has X as a superkey
+
+Examples:
+
+    Partial dependency (2NF): damage = f(type, quality) but damage_type = f(type),
+    so split:
+
+        Weapons[Type | Quality | Damage]
+        WeaponDamageTypes[Type | DamageType]
+
+    Transitive dependency (3NF): weapon_id -> weapon_type -> description, so:
+
+        Weapon[weapon_id | name | weapon_type_id | damage]
+        WeaponType[weapon_type_id | name | description]
+
+    Live-service example:
+
+        PlayerQuest[player_id | quest_id | progress | completed]
+        Quest[quest_id | name | description | reward]
+
+    The quest definition must not be duplicated per player.
+
+More tables can use LESS memory when the denormalized version has many optional
+fields (and therefore nulls/repetition). But the runtime also cares intensely
+about cache locality, branching, bandwidth, SIMD, parallelism and latency — so
+intentionally denormalize runtime data where the hot loop needs the join for
+free. "How much normalization" is an experiment, not a doctrine.
+
+Practical order of operations:
+    1. Start with one big table of all the data.
+    2. Normalize to remove coupling and duplication.
+    3. Re-layout the runtime representation by access pattern.
+
+And the rule about instance vs definition data:
+
+    u generally don't want instance/state data stored with definition data.
+
+1.5 Quantify the data (data and statistics)
+
+Design for the real distribution, not for the imagined one. Measure:
+    - how many entities
+    - value ranges and widths (8/16/32 bit)
+    - update frequency vs query frequency
+    - which values dominate
+    - what is hot vs cold
+
+The bitset-vs-list decision, the choice of sort key, and index-vs-search are
+only rational with real numbers. Fabian's counting chapter makes the point that
+learning to count facts about your data is itself a design technique.
+
+1.6 The problem domain is not the implementation
+
+The design model can keep the human concepts. The implementation must satisfy
+the hardware. Keeping them distinct lets you reshape the implementation without
+breaking the mental model — and lets the mental model survive a rewrite of the
+layout.
+
+Short version: One thing, many representations. Separate independent data.
+Normalize to remove coupling, denormalize for the hot loop, and count before
+you choose.
+
+
+================================================================================
+PART 2 — EXISTENCE-BASED PROCESSING
+================================================================================
+
+2.1 Don't ask repeatedly; store the answer
+
+    Don't repeatedly ask: "does this object do something?"
+    Store:                "these objects do something."
+
+The canonical example: 100,000 entities, only 1,000 hurt.
+
+    // Naive: inspect every entity every update.
+    for (Entity e : entities) {
+        bool hurt  = e.health < MAX_HEALTH;
+        bool dead  = e.health <= 0;
+        bool ready = currentTime - e.lastDamage > REGEN_DELAY;
+        if (!dead && hurt && ready)
+            e.health = min(MAX_HEALTH, e.health + dt * regenRate);
+    }
+
+    // DOD: only hurt entities are stored in the damage set.
+    for (EntityDamage &e : entityDamages) {
+        if (e.health <= 0) {
+            deadEntities.insert(e.id);
+            remove(e);
+        } else if (currentTime - e.lastDamage > REGEN_DELAY) {
+            e.health = min(MAX_HEALTH, e.health + dt * regenRate);
+            if (e.health >= MAX_HEALTH)
+                remove(e);
+        }
+    }
+
+The enum/flag was not "bad"; using it to decide which work should happen was
+bad. Membership now IS the predicate.
+
+    C: mu_sparse_set for the damaged set; mu_bitset for wide 2-valued flags.
+
+2.2 Why use an if (and when not to)
+
+Fabian devotes a chapter to the if. Branches cost only when mispredicted; the
+real question is whether the check is cheaper than the work it avoids.
+
+    if (dirty) update();      // load flag + branch + possible mispredict
+    update();                 // if update is cheap, this can win outright
+
+And existence-based replacement removes the check entirely:
+
+    dirty == true   ->   entity exists in DirtyTable[]
+
+2.3 Don't use bools (as processing filters)
+
+A bool over many rows is usually a dense, mostly-false flag array, which means
+you scan everything to find the few. Instead:
+
+    - represent a sparse state by existence (table membership)
+    - represent a wide 2-valued stream as a bitset
+    - represent a small bounded value in a bit field
+    - do not use more bits/precision/structure than the information requires
+
+    u32 casts_shadow[(MAX_INSTANCES + 31) / 32];
+    u32 visible_mask[(MAX_INSTANCES + 31) / 32];
+
+Process at the granularity the representation supports:
+
+    bitset   -> word/SIMD operations
+    packed   -> vectorized processing
+    sparse   -> affected elements only
+    events   -> changed elements only
+
+    C: mu_bitset (grow/set algebra/CTZ iteration). mylib TODO noted in the
+    notes: a chunked bitset.
+
+2.4 Don't use enums (as flow)
+
+    enum used as DATA  (Color, KeyBinding, CollisionResponse, table lookup)
+        -> usually keep it.
+    enum used as FLOW  (a hot switch/branch in every consumer)
+        -> consider turning it into DATA.
+
+    enum State { A, B, C };
+    switch (state) { case A: ...; case B: ...; case C: ...; }
+
+becomes
+
+    A[]  B[]  C[]      // entity's state == which table it is in
+    for A: transformA();  for B: transformB();  for C: transformC();
+
+This trades "enum + branch" for "data partition + specialized transform".
+Moving an entity between tables has a cost, so rapidly changing state may still
+be better as an enum. Rule of thumb:
+
+    enum as DATA -> keep
+    enum as FLOW -> make it DATA (unless it flips every tick)
+
+2.5 Prelude to polymorphism
+
+    Traditional:  object -> vptr/vtable -> virtual function
+    Enum switch:  object -> type enum -> switch/function table -> function
+
+Both still dispatch at runtime and can suffer branch misprediction,
+instruction-cache misses, indirect-call cost, and heterogeneous processing.
+
+    DOD: object -> table membership -> specialized transform
+
+     type information        -> implicit in table membership
+     polymorphic method      -> specialized transform over a table
+     class constructor       -> data-driven factory
+     runtime type dispatch   -> existential / table-based processing
+
+Factory:
+
+    create_zombie() -> insert Zombie-related data into the relevant tables
+
+Dynamic runtime polymorphism behaves like table membership: an entity's runtime
+behaviour changes by inserting/removing it from tables rather than storing a
+permanent class type and dispatching through a switch or vtable. Because
+entities are referenced by IDs/handles, they can move between tables without
+changing logical identity, and can be in multiple tables simultaneously
+(multidimensional composition, like ECS).
+
+    A truly component-based object is nothing more than the sum of its parts.
+
+    Health + Flying + Weapon + Shield + Regeneration + Stealth   (building blocks)
+    Enemy A = Health + Weapon + Flying
+    Enemy B = Health + Shield + Stealth
+    Enemy C = Health + Flying + Regeneration
+
+2.6 Event handling is subscription by data
+
+Event subscription uses the same mechanism:
+    subscribe   = insert into an event table
+    unsubscribe = delete from it
+    dispatch    = process the subscribed dataset
+
+This avoids polling everything and reduces unnecessary work.
+
+2.7 Don't do null checks
+
+Eliminate them with invariants, not by ignoring errors:
+
+    - resolve and validate at system boundaries
+    - then pass guaranteed-valid data into hot code
+    - if an operation can genuinely fail, make failure explicit (bool result,
+      invalid id, error value, output parameter)
+
+Short version: encode state as existence. Membership is the predicate. Stop
+asking; start storing the answer.
+
+
+================================================================================
+PART 3 — COMPONENT-ORIENTED DEVELOPMENT
+================================================================================
+
+3.1 Components in the wild
+
+Component thinking is not new: filesystems, databases, entity systems and even
+HTML/CSS separate "identity" from "attributes". A component is data with a
+meaning, not a lifecycle-managed object.
+
+3.2 Away from the hierarchy
+
+Inheritance creates a hierarchy where the real relationships are not
+hierarchical. Composition avoids the "diamond" and the "God object":
+
+    Entity = identity only
+    Component = data
+    System = processing
+
+3.3 Towards managers (systems)
+
+    player_update();
+becomes
+    physics_manager_update();
+    animation_manager_update();
+    render_manager_update();
+
+"Systems own the work." A system needs the component data it operates on, and
+nothing else.
+
+3.4 There is no entity
+
+An entity is derived from the component data currently associated with its id:
+
+    typedef uint32_t EntityId;
+
+    SparseArray<Orientation> orientations;
+    SparseArray<Vec3>        velocities;
+    SparseArray<float>       health;
+    SparseArray<int>         xp;
+    SparseArray<int>         controller;
+    SparseArray<int>         bullet_count;
+    SparseArray<Attributes>  attributes;
+    SparseArray<bool>        godmode;
+    SparseArray<bool>        controllable;
+    SparseArray<bool>        visible;
+    SparseArray<AnimId>      current_anim;
+    SparseArray<AnimId>      anim_goal;
+    SparseArray<AssetId>     model;
+    SparseArray<Inventory>   inventories;
+
+        Entity = { components currently associated with its ID }
+
+Creating a player is composition:
+
+    EntityId new_player(int pad_id, Vec3 start)
+    {
+        EntityId id = new_entity();
+        controller[id]  = pad_id;
+        orientations[id] = (Orientation){ .pos = start, .up = {0,1,0}, ... };
+        velocities[id]  = (Vec3){0};
+        health[id]      = 100.0f;
+        xp[id]          = 0;
+        bullet_count[id] = 6;
+        controllable[id] = true;
+        visible[id]     = true;
+        return id;
+    }
+
+3.5 Instance-oriented vs type/system-oriented processing
+
+Instance-oriented (still weak):
+
+    Object 1 { Transform, Physics }
+    Object 2 { Transform, Physics, Render }
+    Object 3 { Transform, Render }
+    -> iterate objects, update their components
+
+Type/system-oriented (the goal):
+
+    Transform table [1,2,3]
+    Physics   table [1,2]
+    Render    table [2,3]
+
+    for (i < transform_count) update_transform(&transforms[i]);
+    for (i < physics_count)   update_physics(&physics[i]);
+    for (i < render_count)    update_render(&renders[i]);
+
+Processing order is now determined by types/systems, not instances.
+
+3.6 Why it helps profiling
+
+500,000 entities, only 50,000 with physics:
+
+    instance-oriented: 500,000 objects -> check physics -> process 50,000
+    system-oriented:   Physics table      -> 50,000 -> process
+
+The profiler can then say "PhysicsSystem = 2.4 ms" instead of physics work being
+smeared through one giant loop.
+
+3.7 The transformation, restated
+
+    enum + switch           -> table membership + direct processing
+    instance -> components  -> component -> instances
+    "What am I?"            -> "What processing am I eligible for?"
+
+Short version: Entity = id. Component = data. System = processing. Iterate
+components, not objects. Tables define types by membership.
+
+
+================================================================================
+PART 4 — HIERARCHICAL LEVEL OF DETAIL
+================================================================================
+
+4.1 Existence: from null to infinity
+
+Classic LOD degrades geometry. DOD degrades simulation, representation, storage
+and even existence.
+
+    LOD 0: full physics, full AI, animation, weapon simulation, high-res mesh
+    LOD 1: simplified physics/AI, low-res animation, medium mesh
+    LOD 2: approximate movement, 1 Hz AI, billboard / low mesh
+    LOD 3: no individual aircraft  -> squadron data
+    LOD 4: no squadron entity      -> wave data
+
+    far  + irrelevant -> low detail
+    far  + important  -> high detail
+    near + irrelevant -> medium detail
+    near + important  -> high detail
+
+Distance is only a proxy for relevance:
+
+    LOD = f(relevance)
+    relevance = f(distance, screen-space size, visibility, player attention,
+                  time since last seen, interaction history, game progression,
+                  player expertise, gameplay importance)
+
+A small object 100 m away and a huge boss 100 m away have the same distance and
+completely different perceptual importance.
+
+LOD can control:
+    - rendering detail
+    - AI update frequency
+    - simulation complexity
+    - amount of stored state
+    - number of runtime entities
+    - whether an entity exists individually
+
+    representation_detail = f(relevance)
+
+But there is more than one gradient:
+
+    full entity -> simplified entity -> collective -> aggregate/count ->
+    implicit / procedural
+
+4.2 Collective LOD — reduce the count, not the cost per instance
+
+    Instead of:
+        Aircraft1 Aircraft2 ... Aircraft100
+    Use:
+        Squadron { count = 100 }
+
+    Aircraft stay as 100 entities but only a few are simulated? Better:
+    simulate the group statistically.
+
+    typedef struct { int aircraft_count; float attack_probability; } Squadron;
+    int simulate_attack(const Squadron *s) {
+        return (int)(s->aircraft_count * s->attack_probability);
+    }
+
+Not a perfect simulation, a believable one at a fraction of the cost. The engine
+may only ever process 100 active entities.
+
+Farming example: a 100x100 field is 10,000 tiles. There is no reason for every
+tile to be an object.
+
+    Naive:  WheatObject { position, state, lifetime, animation, components } x 10,000
+    Better: uint8_t wheat[10000];   // 0 = empty, 1..100 = fully grown
+            position is implicit in the grid index
+            x = index % width;  y = index / width;
+
+    "The wheat doesn't have positions. The positions have wheat."
+
+Same idea:
+    - inventory slots
+    - cells / tiles / voxels
+    - stacks of identical items:
+
+        typedef struct { int type; int count; } ItemStack;
+
+    N identical entities -> 1 record + count
+
+4.3 Mementos — preserve what matters, discard precision
+
+A memento is a compact summary of the state that must survive a reduction in
+detail so the world does not visibly "disconnect":
+
+    High-detail state
+        |
+        +-- important information --> Memento
+        v
+    Low-detail state
+
+    later: Low-detail state + Memento -> High-detail state
+
+Mementos can be lossy:
+
+    instead of recording aircraft #1's broken left window, #7's broken rear
+    window, ... store "2/3 of windows are broken" and regenerate plausibly.
+
+    typedef struct {
+        int   aircraft_count;
+        float average_damage;
+        float broken_window_ratio;
+    } SquadronMemento;
+
+The player perceives consistency. They are not auditing history.
+
+4.4 JIT mementos — don't store derivable history
+
+Instead of storing a memento, store a recipe and generate on demand:
+
+    seed = Hash(unique_value)          // entity id, license plate, world pos
+    state = Generate(seed)
+
+    uint64_t hash64(uint64_t x) {
+        x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+        x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+        x ^= x >> 31;
+        return x;
+    }
+
+    uint64_t seed = hash64(car_id);
+    driver      = generate_driver(seed);
+    passenger_1 = generate_passenger(seed + 1);
+    passenger_2 = generate_passenger(seed + 2);
+
+    visit 1 -> same occupants
+    visit 2 -> same occupants
+    visit 3 -> same occupants
+
+    house_seed = hash(world_x, world_y)  // same house every time
+
+The critical distinction:
+
+    ORDINARY RANDOM:        R_{t+1} = f(R_t)     // depends on history
+    JIT MEMENTO:            R = f(seed)          // depends only on identity
+
+Difference from a normal memento:
+
+    normal memento: detail -> store compressed memory -> rebuild later
+    JIT memento:    store a recipe for reconstructing it, store nothing else
+
+4.5 Procedural worlds want bias, not uniform randomness
+
+    believable world = repetition + variation + imperfections
+    randomness != realism
+    use: deterministic randomness + domain constraints + bias
+
+    convertible       -> higher P(young/fashionable driver)
+    modified import   -> higher P(young driver)
+    family van        -> higher P(family configuration)
+
+    P(driver | car) = biased distribution     (not a hard rule)
+
+Style guides for generation are what stop procedural content becoming soup.
+
+4.6 Alternative axes and temporal LOD
+
+Possible LOD axes: distance, screen-space size, visibility, player attention,
+time since last seen, interaction history, game progression, player expertise,
+gameplay importance.
+
+Temporal LOD:
+
+    0-10 sec   -> full state
+    10-60 sec  -> simplified state
+    1-10 min   -> compressed state
+    very long  -> regenerate from seed
+
+Interaction history:
+
+    ambient car, never touched   -> can disappear / regenerate / ultra-low detail
+    player's parked car          -> preserve state and high detail
+
+    LOD = f(player_experience): first transaction full animation; repeated
+    transactions shorter; expert player batched/instant.
+
+LOD can therefore control gameplay depth, not only graphics.
+
+    LOD              -> reduce representation
+    Collective LOD   -> reduce instance count
+    Memento          -> retain only important history
+    JIT memento      -> don't store derivable history
+    Spatial memento  -> store persistent changes near where they matter
+    JIT index        -> don't maintain expensive lookup structures until needed
+
+4.7 Derived state vs explicit state
+
+Explicit state creates transition bugs:
+
+    bool in_options;  bool in_volume_menu;
+    in_options = false; in_volume_menu = true;   // invalid, but representable
+
+Prefer derived state:
+
+    int menu_depth;
+    options_visible = menu_depth >= 1;
+    volume_visible  = menu_depth >= 2;
+
+    state = f(other_state) is safer than many independent booleans.
+
+Short version: LOD is the resolution of existence. Reduce the number of
+instances before optimizing per-instance cost. Store compressed history
+(mementos) or a seed (JIT). Keep only the detail the player perceives.
+
+
+================================================================================
+PART 5 — CONDITIONAL FLOW
+================================================================================
+
+5.1 Building questions
+
+Prefer data that answers a question directly over recomputing it. "Does this
+entity have health?" can be one bit in a presence mask loaded with data you
+already fetch.
+
+5.2 Flip it on its head
+
+Instead of iterating entities and asking whether each needs work, iterate the
+table of entities that need work. Reverse the loop's subject:
+
+    for (all) if (needs_work) work();      ->      for (needs_work[]) work();
+
+5.3 Logging decisions for debug
+
+When control flow is data-driven it can be hard to see why something happened.
+Keep a small log of the decision inputs and outputs (which condition matched,
+which transition fired). Debugging becomes reading a record instead of
+single-stepping.
+
+5.4 Branching without branching
+
+    if (c) x = A; else x = B;      ->      x = c ? A : B;   // CMOV/select
+    if (a > b) swap(a, b);         ->      hi = MAX(a,b); lo = MIN(a,b);
+
+Extra arithmetic can be cheaper than an unpredictable branch. Sorting networks
+are the extreme case: a fixed sequence of compare-exchanges independent of
+input values.
+
+    Sort 4: Stage 1 (A,C) (B,D) | Stage 2 (A,B) (C,D) | Stage 3 (B,C)
+
+Advantages: fixed execution pattern, predictable timing, branch-free, easy to
+parallelize stage-wise, good for small fixed-size data.
+
+Predication, generalized:
+
+    calculate both possibilities -> choose result
+    (instead of) calculate condition -> branch -> execute one path
+
+    extra arithmetic  <  branch + unpredictable control flow    (when so)
+
+Short version: reverse the loop so the data answers the question. Prefer
+selects to branches. When in doubt, the compiler and the data distribution
+decide — measure.
+
+
+================================================================================
+PART 6 — FINITE STATE MACHINES AS DATA
+================================================================================
+
+6.1 Traditional FSM and its problem
+
+    current state + incoming signal -> next state
+
+    enum State { Idle, Walking, Jumping };
+    switch (state) { ... }
+
+State controls control flow; state-dependent data is buried in objects.
+
+6.2 Tables as states
+
+    Idle[]  Walking[]  Jumping[]
+    entity 42 in Walking[]  =>  entity 42 is walking
+
+Transition = remove from one table, insert into another.
+
+6.3 Condition tables
+
+    Walking[] + JumpPressed[] -> transition request
+
+A condition table is "which entities currently satisfy this condition?". The
+condition is data, and it changes automatically when the table changes.
+
+6.4 Transition tables — evaluate then commit
+
+    old_state + signals
+        -> condition tables
+        -> transition_requests
+        -> trigger / logging
+        -> commit
+        -> new_state
+
+    typedef struct { EntityId entity; int next_state; } Transition;
+    Transition transitions[MAX]; size_t transition_count;
+
+    // evaluate: read old state, write requests
+    for (i < walking_count) {
+        EntityId id = walking[i];
+        if (jump_pressed(id))
+            transitions[transition_count++] = (Transition){ id, STATE_JUMPING };
+    }
+    // commit: single mutation point
+    for (i < transition_count) apply_transition(transitions[i].entity, ...);
+
+Why delay the commit: with immediate transitions, signal order changes the
+result (A changes state, then B sees the new state). Evaluating all signals
+against one snapshot and committing together makes the update deterministic.
+
+6.5 Keep the old-style FSM when order matters
+
+A lexer/parser is fundamentally sequential: character A causes a state change
+that determines how character B is read. For those, the traditional sequential
+FSM is correct. Use the transform-oriented model when signals can be evaluated
+together and state changes can be committed afterward.
+
+6.6 Multiple simultaneous states
+
+If conditions represent independent dimensions, an entity can be in several
+tables at once:
+
+    Entity 42 in StateA[] and StateB[]
+
+This is component composition, not a single-state enum. Point-and-click example:
+`HasKey[]`, `HasGem[]`, `HasScroll[]` — the game advances when all three exist,
+which replaces `bool hasKey; bool hasGem; bool hasScroll;` and the manual
+synchronization between them.
+
+6.7 Transitions as triggers
+
+Transitions are the natural place for on-enter/on-exit effects:
+
+    enter InWater[] -> change input mapping, enable swim, create oxygen UI
+    exit  InWater[] -> restore controls, hide oxygen UI, regenerate oxygen
+
+And they are a natural logging/telemetry point.
+
+6.8 State as a processing set
+
+    PotentiallyVisible[] -> CullingSystem
+    Damaged[]            -> DamageSystem
+    Burning[]            -> FireSystem
+
+A state table answers both "what state am I in?" and "which entities need this
+processing?".
+
+6.9 Count LOD + FSM
+
+A state transition can be the moment entities appear or disappear at a higher
+level of detail (collective -> individual). This is also a great debugging point.
+
+6.10 Data-driven and self-modifying
+
+Conditions live in tables, so changing the FSM is inserting/deleting/modifying
+rows, not rewriting code. A system can unlock an ability by inserting into a
+condition table, after which gameplay behaviour changes with no control-flow
+rewrite.
+
+Short version: state = table membership. Evaluate all conditions against one
+consistent state, buffer transition requests, then commit once. Keep the
+sequential FSM only where signal order is the problem.
+
+
+================================================================================
+PART 7 — SEARCHING
+================================================================================
+
+7.1 Lookup is usually a memory problem
+
+A slow lookup is often: unnecessary data loads, cache misses, poor locality,
+pointer chasing, repeated queries, or unnecessary full-table scans.
+
+    Design the data layout around the query. Not the query around the object.
+
+The biggest optimization is avoiding unnecessary work. Before building a search
+structure:
+
+    Do we actually need to search?
+
+If a value is sorted, indexed, directly addressable, or lives in a fixed slot, a
+separate search is unnecessary.
+
+7.2 Build indexes on demand, for hot queries
+
+    cold -> search -> hot -> generated index -> maintained on insert/update/delete
+
+Do not build every index ahead of time. A query can monitor how often it runs:
+
+    Query A:  used 10 times
+    Query B:  used 10,000,000 times      <- candidate for an index
+
+Index infrastructure can also be profiling infrastructure: if the runtime
+records which queries requested indexes, you discover frequently accessed
+tables and hot data paths.
+
+7.3 Locality beats asymptotics for small ranges
+
+    O(log N) with poor locality   can lose to   O(N) with excellent locality
+
+When a cache line is loaded, use as much of it as possible. A cache-friendly
+linear scan can beat a binary search over a suitable range.
+
+7.4 Bloom filters for cheap existence
+
+    "definitely absent" or "possibly present"
+    false positives allowed, false negatives not.
+
+    if (!bloom_maybe_contains(&health_bloom, id)) skip the expensive lookup;
+
+Useful for fast existence checks and deciding which table may contain an entity.
+
+7.5 "Find the nearest / best" as a maintained subset
+
+If "find the nearest 3 food sources" runs every frame, do not rescan. Keep
+`best[3]` and update the small set when the underlying data changes.
+
+7.6 Structure choice by workload
+
+    frequent modifications -> hash table
+    mostly static data     -> tree
+    very static data       -> perfect hash
+
+Traditional binary tree = many pointer hops. B-tree = wide nodes, many keys per
+node, more useful data per cache line.
+
+7.7 Fingerprinting and cheap rejection
+
+Sometimes the cheapest test is a hash/fingerprint check: if the fingerprint does
+not match, the expensive comparison and load are unnecessary. (Also the basis of
+hash-join and content-addressed lookups.)
+
+7.8 Sorted layout notes for static data
+
+Sorted arrays give: branchless binary search, cache-friendly precomputed
+layouts (Eytzinger layout for static search trees), and merge joins. See the
+Algorithmica "Binary Search" chapter for the branchless / Eytzinger techniques.
+
+Short version: avoid searching when you can derive. Index the hot queries only.
+Cache-friendly linear/merge beats clever-but-scattered. Bloom filters reject
+cheaply. Maintain small result sets instead of rescanning.
+
+
+================================================================================
+PART 8 — SORTING
+================================================================================
+
+8.1 Do you need to sort at all?
+
+    Do not sort unless sorting is required.
+    Partition data before sorting when different groups need different orders.
+    Sort only as much as necessary.
+
+    full sort: 1,000,000 items ordered
+    partial sort: only the required section ordered (top K, K << N)
+    quickselect: find the Nth element without sorting everything
+    incremental: maintain sorted state across small updates (insertion sort)
+    unstable operations when order is irrelevant
+
+8.2 Choose by data shape, not by habit
+
+    discrete key range known and small -> counting / radix sort
+    floating / continuous             -> comparison sort
+    small or nearly sorted            -> insertion sort
+    tiny fixed N                      -> sorting network / bubble sort
+    large, parallel-friendly          -> merge sort (parallel merges)
+
+Counting sort on a 256-value material id is near-linear and trivial:
+
+    #define MAX_MATERIALS 256
+    void counting_sort_material(RenderCall *src, RenderCall *dst, int n) {
+        int bucket[MAX_MATERIALS] = {0};
+        for (i < n) bucket[src[i].material_id]++;
+        int offset[MAX_MATERIALS], sum = 0;
+        for (i < MAX_MATERIALS) { offset[i] = sum; sum += bucket[i]; }
+        for (i < n) { int k = src[i].material_id; dst[offset[k]++] = src[i]; }
+    }
+
+Radix sort is excellent when keys are integer-like with a known small range.
+But parallelizing radix sort is nontrivial: multiple threads contend for the
+same bucket/index structures, causing cache contention and nonlinear scaling.
+More threads != proportionally more performance.
+
+8.3 Sorting networks and branchless compare-exchange
+
+    if (a > b) swap(a, b);      ->      hi = MAX(a,b); lo = MIN(a,b);
+
+Fixed operation sequence, no data-dependent control flow, parallelizable at
+stages. Especially useful when N is small and known and predictable execution
+time matters.
+
+8.4 Maintain instead of re-sort
+
+If data is nearly sorted with small updates, insertion sort or an incremental
+structure beats a full re-sort every frame.
+
+8.5 Sorting for the platform / measure the real workload
+
+    - data size
+    - value distribution
+    - data range
+    - update frequency
+    - required ordering
+    - memory layout
+    - cache behaviour
+    - branch behaviour
+    - parallelism
+    - platform characteristics
+
+8.6 Render sorting (a worked example)
+
+    - Sort opaque objects front-to-back: depth rejection kills overdraw before
+      the fragment shader runs (A writes depth; B's covered fragments rejected).
+    - Sort transparent objects back-to-front: blending depends on draw order.
+    - Opaque cost ~= texture_cost + mesh_cost + state_change_cost + overdraw_cost.
+      Measure the profile and choose the sort key; support several (texture,
+      material, mesh, depth) and pick per scene.
+    - Sort sound channels by amplitude relative to sample position for priority.
+
+Do not assume one order always wins: assets and scenes change, so the best
+strategy can differ per frame.
+
+Short version: don't sort unless required; sort only as much as required;
+radix/counting for known discrete ranges; networks for tiny fixed N; maintain
+incrementally; and measure the actual workload's cost profile.
+
+    LOOK AT THE DATA FIRST. THEN CHOOSE THE ALGORITHM.
+
+
+================================================================================
+PART 9 — THE ENTITY-RELATIONAL APPROACH
+================================================================================
+
+9.1 Tables / arrays as the default
+
+Most processing is:
+
+    - reading an array
+    - transforming one array into another
+    - modifying an array in place
+
+Progression:
+
+    array -> structure of arrays -> specialized / indexed layout
+
+9.2 Relational data vs object data
+
+Relational tables are sets of homogeneous rows with no identity other than
+their key; operations are set-oriented. Objects carry identity, behaviour and
+lifetime. DOD leans relational for the bulk data and keeps identity in ids.
+
+9.3 Normalisation (see Part 1.4)
+
+Also: implicit entities. Many rows are "entities" without a class — a position
+row and a velocity row joined by id are an entity. Components imply entities.
+
+9.4 Cosmic hierarchies
+
+Tables can reference other tables by id, forming a hierarchy of tables rather
+than a hierarchy of objects. The hierarchy is a query pattern, not a class tree.
+
+9.5 Structs of arrays and stream processing
+
+    struct Node { Vec3 position; Vec3 velocity; Vec3 color; LifetimeInfo life; };
+    Node nodes[N];
+
+vs
+
+    struct NodeSystem {
+        Vec3 positions[N];
+        Vec3 velocities[N];
+        Vec3 colors[N];
+        LifetimeInfo lifetimes[N];
+    };
+
+    for (i < N) positions[i] += velocities[i] * dt;
+
+SoA benefits: continuous streams, better locality for systems that use only some
+fields, SIMD. But SoA is NOT automatically superior: if x,y,z are always consumed
+as one unit, splitting them costs extra loads and translation-table pressure.
+Choose from the access pattern.
+
+Also: the CPU can incur costs switching between read and write activity, so
+predictable, sequential, serial writes are good.
+
+9.6 Beautiful homogeneity
+
+The deeper payoff: once data is in standard layouts, the same optimized
+routines (sort, filter, join, reduce) are reusable across every table. You stop
+writing type-specific special cases and start composing a small set of data
+transforms.
+
+9.7 Anatomy: skeletal animation as a data structure
+
+The classic worked example (dodanimationrenderer.txt). The naive version:
+
+    struct Joint {
+        Matrix globalPose;
+        Matrix localPose;
+        vector<Joint*> children;
+    };
+
+    void LocalToGlobalPose(Joint* joint, Matrix parent) {
+        joint->globalPose = parent * joint->localPose;
+        for (Joint* child : joint->children)
+            LocalToGlobalPose(child, joint->globalPose);
+    }
+
+Problems: pointer chasing (joint -> pointer -> child -> pointer -> next),
+recursion overhead. Measured at 3.8 ms for the workload.
+
+Fix 1 — store parents, not children. The transform only needs:
+
+    Global[i] = Global[parent[i]] * Local[i]
+
+so store the relationship the OPERATION requires, not the conceptual hierarchy:
+
+    parent[0] = INVALID
+    parent[1] = 0
+    parent[2] = 1
+    parent[3] = 2
+
+Fix 2 — indices instead of pointers. A pointer is 8 bytes and needs fixups when
+the skeleton moves or is serialized; `uint16_t parent` is 2 bytes, serializes
+directly, and makes the whole skeleton movable:
+
+    pointer = physical address
+    index   = logical position
+
+Fix 3 — depth-first numbering. If joints are stored in the order a DFS would
+visit them, then for every non-root joint:
+
+    parent[i] < i
+
+which means `global[parent[i]]` is already computed when you reach `i`. This is
+a topological order written into the array layout:
+
+    dependency -> earlier array index
+
+Recursion becomes data:
+
+    global[0] = local[0];
+    for (i = 1; i < joint_count; ++i)
+        global[i] = mul(global[parent[i]], local[i]);
+
+Fix 4 — SoA:
+
+    hierarchy[] | localPoses[] | globalPoses[]
+
+The accessed streams are compact and contiguous; future `hierarchy[i+k]` arrives
+in the same cache line.
+
+Lesson: "Store the relationship required by the operation." The array order
+itself can encode the traversal.
+
+9.8 Joins
+
+    join by iteration
+    join by lookup
+    join once and cache the result
+
+If a join is used repeatedly: join once, save the relationship, reuse it (like a
+database index). An auxiliary structure lets a table be traversed in another
+useful order. Every index costs memory and update work, so only create the
+useful ones, and choose update-on-write vs rebuild/sort-on-first-read according
+to the workload.
+
+9.9 Tables as intersections
+
+    EntityRenderable { entityID }
+    EntityPosition   { entityID }
+    join: entityID appears in both -> Renderable + Position -> AddRenderCall()
+
+    Intersection(A, B) -> Transform
+
+9.10 Varying-length sets
+
+Sets whose size varies (children, edges, tags) use pools/chunked storage with
+indices rather than a pointer per list. `mu_chunked_u32_array` is the library
+primitive for many small lists sharing a chunk pool.
+
+Short version: rows and tables, joined by id. SoA for streams, AoS for records
+consumed whole. Store the relationship the operation needs; let array order
+carry the traversal. Reuse transforms; cache repeated joins.
+
+
+================================================================================
+PART 10 — OPTIMIZATION AND TRANSFORMS
+================================================================================
+
+10.1 Separating data from the operation
+
+    input data -> operation -> output data
+
+    WHAT data is required?      vs      HOW is it transformed?
+
+This lets the data-gathering mechanism be separated from the operation. A
+"schema iterator" can yield matching rows from several tables, merging/joining
+while iterating instead of materializing temporary joined tables. Useful for
+large merges and simple transforms.
+
+10.2 Map and reduce
+
+    MAP:    y[i] = f(x[i])                    usually trivially parallel
+    REDUCE: total = combine(values[i])        parallel if associative
+
+    (A op B) op C == A op (B op C)            associativity is enough
+
+Adding/multiplying/matrix-multiplying are associative. Parallel reduction:
+
+    (((A+B)+C)+D)   ->   (A+B) + (C+D)
+
+    sequential depth O(N)   ->   parallel depth O(log N)
+
+10.3 Prefix sum
+
+    input  = [2 3 1 4]
+    prefix = [2 5 6 10]
+
+Uses: radix-sort offsets, compacting filtered output, parallel allocation,
+generating output positions. Algorithmica has a whole chapter on SIMD prefix sum
+(including blocked, interleaved and non-temporal variants).
+
+Compaction:
+
+    input:  A B C D E F
+    keep:   1 0 1 1 0 1
+    offsets: A->0 C->1 D->2 F->3
+    final:  A C D F
+
+10.4 Lazy evaluation for the masses
+
+Dirty flags and lazy updates sound efficient but the check has cost (load,
+branch, possible mispredict, speculative load of data that turns out to be
+unneeded). If the update is cheap, always doing it can win. "Is avoiding the
+work cheaper than doing the work?"
+
+10.5 Not getting what you didn't ask for
+
+Object-oriented grouping drags unrelated fields into the cache:
+
+    Player { position, health, inventory, animation, audio, networking, ... }
+
+A function needing only `position` may load unrelated fields. Normalized tables
+(Position[], Health[], Inventory[], ...) let systems request only what they need.
+
+10.6 Spatial sets for collisions and queries
+
+    all objects -> spatial query -> possible collisions -> expensive narrow test
+
+Spatial partitioning reduces the candidate set for collision, ray casting and
+pathfinding. A "spatial" partition can use any meaningful axes, not only
+position: AI could partition by (position, threat, reward); audio by (distance,
+volume, importance). Partition by the dimensions relevant to the query.
+
+Broad phase with a grid: the grid already partitions units, so test only the same
+and neighbouring cells (avoids O(n^2)). Narrow phase: occupancy check or a
+precise test only on candidates.
+
+10.7 Bit twiddling and decision tables
+
+Pack booleans and small bounded values; use bit tricks and small lookup tables
+to replace branching. Algorithmica's "Bit Manipulation" and "Instruction Tables"
+chapters cover this. Bloom filters, popcount/CTZ iteration, masks, and counting
+sorts are all in this family.
+
+10.8 Data-driven techniques
+
+Callbacks, scripts and state machines are data-driven but can introduce
+branches, indirect calls, cache misses and pipeline disruption (indirect
+branching is a whole Algorithmica chapter). Prefer tables and transforms where
+the indirection is not buying flexibility you actually need.
+
+10.9 Callbacks as event tables
+
+    badGuyDies() -> callback -> update score      (repeated read/write of score)
+
+    DeadBadGuys[] -> after the pass, score += dead_bad_guys_count;
+
+Count then apply once, instead of read-modify-write per event. Reduces memory
+traffic and synchronization.
+
+10.10 Scripting and SIMD execution
+
+Scripts run per entity introduce lots of branches because the system interprets
+the script separately for each entity. Collect many entities and execute
+operations over the collection; even better, execute the same instruction over
+many entities with SIMD.
+
+10.11 Optimisation workflow (the book's order)
+
+    Define -> Measure -> Analyse -> Implement -> Confirm
+
+Prefer simple machinery whose cost is visible. Optimize data movement before
+instruction count. Do not sacrifice substantial clarity for hypothetical
+performance. Log your data's shape, then design for the real distribution. Keep
+telemetry in production builds; let hot query paths announce themselves.
+
+Short version: separate gathering from transforming; map/reduce/prefix-sum are
+the primitives; spatial partitions reduce candidates; don't load what you didn't
+ask for; measure the real workload.
+
+
+================================================================================
+PART 11 — CONCURRENCY -> MOVED TO APPENDIX M (STRICTLY SEPARATED)
+================================================================================
+
+Single-threaded desktop hardware efficiency (cache lines, TLB, ILP, branchless
+math, full SIMD/AVX2/AVX-512, flat data structures) ALWAYS comes before threads.
+Two threads fighting over pointer-chased OOP structs just saturate the memory
+controller twice as fast.
+
+All multithreading, MESI cache coherency, lock-free rings, Linux kernel
+seqlock / RCU / SLUB per-thread freelists, and Naughty Dog user-space fiber
+notes have been consolidated into APPENDIX M at the end of this file (and
+isolated in perf_test/bench_multithreading_separate.c).
+
+
+================================================================================
+PART 12 — HARDWARE
+================================================================================
+
+12.1 Sequential data
+
+Memory is not random access at uniform cost. The hierarchy:
+
+    L1   ~4 cycles     ~32-48 KB
+    L2   ~12 cycles    ~256 KB - 1 MB
+    L3   ~40 cycles    MBs
+    DRAM ~80-300 cycles
+
+Every request fetches a cache line (~64 bytes = 16 ints = 8 doubles = 512 bits).
+Sequential access lets hardware prefetch; random access defeats it.
+
+12.2 Deep pipes and predictable instructions
+
+Modern CPUs are deeply pipelined and execute out of order, speculatively. They
+thrive on: independent work, predictable branches, regular memory access. They
+suffer on: data-dependent branches, pointer chains, dependent loads, alias
+uncertainty.
+
+    branch exists  !=  branch is unpredictable
+    a mispredict is ~15-20+ cycles = front-end refill + window drain (Eyerman'06)
+
+Note that mispredict cost is NOT a fixed constant: if the branch depends on a
+long chain or a cache miss, the wrong-path ops sit in the ROB longer and the
+penalty exceeds nominal pipeline depth.
+
+12.3 Microcode, function calls and indirection
+
+Indirect calls (vtables, callbacks, function tables) cost a load of the target
+address plus an indirect jump. Modern `ITTAGE` indirect branch predictors
+(Seznec'11) can learn repeating or history-correlated indirect targets — Rohou
+et al. (CGO'15) showed current predictors absorb much of interpreter dispatch!
+Virtual dispatch's REAL killer on entity arrays is twofold: random type order
+defeating `ITTAGE`, AND the two extra cache-line loads (object -> vptr -> vtable
+-> scattered heap fields) before a single float of work happens. Batching by
+type fixes both.
+
+12.4 SIMD (and the "vectorized" float-reduction trap)
+
+    scalar: A0 A1 A2 A3      (four instructions)
+    SIMD:   [A0 A1 A2 A3]    (one instruction)
+
+SIMD needs: contiguous data, independent lanes, alignment, no early exit, no
+cross-iteration dependencies, no aliasing. SoA layout is the usual enabler.
+Modern compilers auto-vectorize simple loops; write the simple loop first, check
+`-fopt-info-vec` / `-Rpass=loop-vectorize`, and read the emitted assembly!
+
+CRITICAL TRAP: A loop the compiler reports as "vectorized" can STILL run at
+scalar speed! Without `-fassociative-math` (or OpenMP `simd reduction(+:sum)` or
+explicit multi-vector accumulators in C), IEEE-754 forbids reordering `(a+b)+c`.
+Clang/GCC will emit packed `vmulps` feeding a serial chain of scalar `vaddss` —
+still bound by 1 scalar `fadd` latency per element! Unroll 4–8 vector
+accumulators explicitly in C to get full SIMD FMA throughput deterministically.
+
+SIMD particle update (from the book):
+
+    scalar: posx[i] += vx[i]*dt; posy[i] += vy[i]*dt + gd2; posz[i] += vz[i]*dt;
+    SIMD:   load four x, four vx, x = x + vx*dt, store
+
+Roughly 4x for the example. But: SIMD is not automatically faster. Setup,
+remainder handling and short trip counts can lose.
+
+12.5 Aliasing, runtime versioning (`a == c` trap) and return values
+
+    possible alias -> unknown side effects -> fewer optimizations (or checks)
+    known non-alias -> registers, reorder, unroll, vectorize cleanly
+
+    p and q may be the same memory -> compiler must reload through p after a
+    write through q, OR emit a runtime pointer-overlap check!
+
+SUBTLE TRAP (proven in `08-autovectorization-aliasing`): On `a[i] = b[i]*s + c[i]`
+without `restrict`, Clang/GCC often DO vectorize by emitting two loops behind a
+runtime overlap check! When `a, b, c` are distinct, plain runs as fast as
+`restrict` (modulo prologue overhead on tiny N). When called IN-PLACE (`a == c`,
+i.e. `saxpy` `a[i] = b[i]*s + a[i]`), the runtime check FAILS and silently runs
+the scalar fallback (`5.29x` slower in L1!), even though iteration `i` has zero
+backward dependency! Fix: separate in-place signatures with `MU_RESTRICT` on
+distinct pointers, or `#pragma clang loop vectorize(assume_safety)` / `ivdep`.
+
+`const` prevents modification through *that* reference; it does not prove
+non-aliasing. Return small trivial POD structs (`<= 16B` on SysV x86-64) by
+value in registers; in C++, any non-trivial destructor/copy ctor forces stack
+passing by hidden pointer under the Itanium C++ ABI (Chandler Carruth'19).
+
+12.6 Cache-line utilization, false sharing, speculation
+
+    load a cache line -> use the unused bytes for useful metadata
+
+    presence cache: "does this entity have X?" in a mask loaded with the data
+    partial cache:  "where is X?"
+    full cache:     the answer itself
+
+False sharing, speculative cache pollution, and predicate caching are all in the
+same chapter of the book: keep independent thread data apart, avoid speculative
+loads of data you may not need, and cache cheap predicates to gate expensive
+lookups.
+
+12.7 Don't get evicted; process in bursts
+
+Hot code evicts hot code; hot data evicts hot data. Keep the hot set small and
+process one workload in a burst (A A A A B B B B C C C C) so the loaded code and
+data are actually used before eviction. Alignment and regular array lengths make
+vectorization easier; padding is often cheaper than special-case remainder code.
+
+12.8 Instruction count is not performance
+
+A shorter assembly sequence is not automatically faster. Inspect generated code
+and measure actual runtime. Compiler-specific behaviour varies; write simple code
+and check.
+
+    GIVE THE CPU AND COMPILER PREDICTABLE DATA, PREDICTABLE CONTROL FLOW, AND
+    PREDICTABLE MEMORY ACCESS, THEN LET THEM DO THE CLEVER WORK.
+
+Short version: the machine wants contiguous, independent, predictable work.
+Give it that, keep hot sets small, and let the compiler vectorize simple loops.
+
+
+================================================================================
+PART 13 — FROM ALGORITHMICA (ALGORITHMS FOR MODERN HARDWARE)
+================================================================================
+
+The Algorithmica HPC series (translated from the Russian) is the quantitative
+half of these notes. Its table of contents, mapped to practice:
+
+  COMPLEXITY MODELS
+    hardware, models, levels, languages
+    -> cost models must include memory movement, not just operation counts.
+
+  PROGRAMMING LANGUAGES / COMPILATION
+    stages, precalc, flags, contracts, situational, abstractions, limitations,
+    arithmetic
+    -> know what your compiler does: aliasing, inlining, UB, constexpr/precalc,
+       target flags; non-zero-cost abstractions (virtual calls, exceptions).
+
+  COMPUTER ARCHITECTURE
+    isa, assembly, functions, loops, indirect, layout, interaction
+    -> read assembly of the hot path; understand the branch/call/memory cost of
+       the code the compiler emits.
+
+  INSTRUCTION-LEVEL PARALLELISM / PIPELINING
+    throughput, limits, hazards, scheduling, tables, branching, branchless
+    -> latency vs throughput, dependency chains, limiting factors, latency
+       tables, and branchless programming (CMOV, conditional stores, sorting
+       networks, bit tricks).
+
+  MEMORY
+    paging, cache-lines, associativity, latency, bandwidth, mlp, prefetching,
+    sharing, pointers, aos-soa, alignment
+    -> the substructure of Part 12 above:
+         - latency vs bandwidth are different bottlenecks
+         - MLP: independent misses can overlap
+         - prefetch instructions and hardware prefetch
+         - cache associativity causes conflict misses even under capacity
+         - pointers defeat prefetch; SoA and alignment help
+         - false sharing on shared lines
+
+  SIMD
+    auto-vectorization, intrinsics, masking, shuffling, moving, reduction
+    -> vector types, lane masks, blends, in-register shuffles, horizontal
+       reductions, and the cost of gathering. Includes SIMD prefix sum.
+
+  ARITHMETIC
+    integer, float, ieee-754, errors, newton, rsqrt, division, bit-hacks,
+    compression
+    -> fixed point, fast (approximate) reciprocal / rsqrt / Newton iteration,
+       integer division cost, bit manipulation, and packing/quantization.
+
+  NUMBER THEORY
+    modular arithmetic, Montgomery, finite fields, euclid
+    -> for hashing, crypto and integer kernels.
+
+  EXTERNAL MEMORY
+    model, sorting, list-ranking
+    -> algorithms for data larger than RAM; external sorting; block/tile the
+       loop nest before blaming the hardware.
+
+  DATA STRUCTURES
+    binary-search, bitset, b-tree, s-tree, filters, hash-tables, segment-trees
+    -> branchless/Eytzinger binary search for static data; bitsets; B-trees /
+       S-trees (wide nodes, cache-friendly, static layouts); Bloom/quotient
+       filters; open addressing and hashing.
+
+  ALGORITHMS (case studies)
+    argmin, factorization, gcd, logistic, matmul, prefix, reading-integers,
+    sorting
+    -> the pattern of the series: take a real kernel, count the actual memory
+       and instruction traffic, then restructure (blocking, SIMD, non-temporal
+       and prefetch variants) and re-measure. Matrix multiplication and prefix
+       sum are the canonical worked examples.
+
+  PARALLEL / DISTRIBUTED
+    parallel algorithms, concurrency, synchronization, runtimes, actors,
+    message-passing, fibers, GPU/CUDA, OpenMP
+    -> scaling limits, coin-scheduling vs locks, runtimes, and when the GPU's
+       bandwidth and thousands of threads actually pay off.
+
+  PROFILING
+    benchmarking, instrumentation, events, noise, simulation, machine-code
+    analyzers
+    -> benchmark like a scientist: named hardware, release flags, a control
+       (do-nothing or known-cost) baseline, repeated runs, measure the median /
+       low percentile, separate the harness from the kernel, and publish the
+       harness so the number is reproducible. Use hardware counters and a
+       machine-code analyzer (llvm-mca-style) to see where cycles go.
+
+  Distributed, cryptography, compression, error-correction, number theory:
+    the remaining chapters apply the same model to other domains.
+
+The unifying lesson: performance is a property of the whole execution —
+instructions, memory system and compiler — so count all three and measure.
+
+Short version: Algorithmica gives the numbers and the modern toolkit for Parts
+12 and 10: ILP, caches, MLP, SIMD, branchless, layout, blocking and honest
+benchmarking.
+
+
+================================================================================
+PART 14 — PATTERNS, ANTI-PATTERNS, AND THE REAL WORLD
+================================================================================
+
+14.1 The recurring patterns
+
+    PATTERN 1  state -> table membership
+    PATTERN 2  optional state -> sparse component
+    PATTERN 3  scheduled event -> sorted time table
+    PATTERN 4  object identity -> ID
+    PATTERN 5  object -> component composition
+    PATTERN 6  full entity -> collective representation
+    PATTERN 7  dirty flag -> list of things that need work
+    PATTERN 8  object hierarchy -> independent data transforms
+
+Core code shapes:
+
+    // existence-based component
+    typedef struct { EntityID id; float health; } Health;
+    Health health_table[MAX_DAMAGED]; size_t health_count;
+
+    // remove when no longer needed (swap-remove)
+    if (health[i].health >= max_health)
+        remove_unordered(health_table, &health_count, i);
+
+    // scheduled recharge: sort by ready_time, process while ready_time <= now
+    typedef struct { EntityID id; float ready_time; } Recharge;
+    while (count && recharge[0].ready_time <= now) fire(recharge[0].id);
+
+    // implicit entity + components
+    typedef uint32_t EntityID;
+    typedef struct { EntityID id; Vec3 position; } Position;
+    typedef struct { EntityID id; Vec3 velocity; } Velocity;
+    // entity 42 = ID 42 -> Position + Velocity
+
+14.2 Scheduled work instead of polling
+
+A table sorted by `ready_time` turns "check every entity every frame" into
+"while the next one is ready, do it". Same idea as event queues and timers.
+
+14.3 Don't maintain an index unless it pays
+
+A real example from the book's server work: after profiling, only two rare
+queries benefited from a maintained sorted index; the fix was to remove the
+permanent index and sort only when the rare query runs. An optimization has a
+maintenance cost; keep it only when the workload justifies it.
+
+14.4 Rendering done right
+
+Old: walk a scene graph every frame, gather transforms/materials/meshes, build a
+render queue, sort, render. Polymorphic nodes and a full traversal each frame.
+
+New: register render elements on node add, unregister on remove, render from the
+registered list. Benefits: no full traversal, fewer pointer lookups and virtual
+calls, better cache behaviour, no repeated data gathering.
+
+14.5 Don't optimize hypothetical future requirements
+
+Build the data for the work the program does now. Components should represent
+elements, not renamed large objects. (The book's multiplayer repair example
+started with event = data + timestamp, and only added structure when profiling
+demanded it.)
+
+14.6 Migration is hard
+
+Converting a mature OOP codebase to components is expensive because the old
+architecture already assumes objects, inheritance, ownership, lifetimes, method
+calls and central instances. Being component-oriented from the start is much
+cheaper than a complete migration later.
+
+14.7 Anti-patterns
+
+    - a struct with many fields consumed by different systems
+    - pointers as long-lived identity
+    - bool flags checked in hot loops
+    - enum + switch as runtime polymorphism in a hot loop
+    - linked lists / pointer trees in hot paths
+    - AoS when every loop touches one field (and SoA when it does not)
+    - building every index up front
+    - free/realloc per frame instead of arena rewind / inactive reuse
+    - a shared accumulator written by every thread
+    - small per-thread data unpadded on a shared line
+    - branching on random data in an inner loop
+    - searching when the answer is directly addressable
+    - simulating every entity when a believable statistic would do
+    - optimizing without measuring
+    - assuming SIMD/SoA/branchless/non-temporal always win
+    - hidden allocation behind helpers, iterators or virtual calls
+
+14.8 Code quality
+
+    - keep control flow obvious
+    - keep ownership obvious
+    - keep lifetimes predictable
+    - avoid hidden work, hidden allocation and unnecessary indirection
+    - avoid unnecessary abstraction
+    - prefer simple mechanisms with measurable cost
+    - assertions for important invariants in debug builds
+    - comments explain why, not what
+
+14.9 The most important lessons (from the book's practical chapter)
+
+    1.  DOD is practical, not merely theoretical.
+    2.  Keeping data independent makes systems easier to redesign.
+    3.  Avoid coupling data simply because concepts are related.
+    4.  Reuse transformations instead of inheritance hierarchies.
+    5.  Process only data that actually needs processing.
+    6.  Sparse components are useful for optional/active state.
+    7.  Scheduled work can replace repeated polling.
+    8.  Aggregate entities when individual identity is irrelevant.
+    9.  Don't optimize hypothetical future requirements.
+    10. Components should represent elements, not rename large objects.
+    11. An entity can be represented simply by an ID.
+    12. Components attached to an ID define the entity implicitly.
+    13. Runtime composition is easier with no central entity class.
+    14. Dirty checks are not automatically cheaper than doing work.
+    15. Profile before deciding whether an optimization helps.
+    16. Migrating mature OOP code to DOD is difficult.
+
+    DON'T BUILD AN OBJECT BECAUSE THE THING HAS A NAME.
+    BUILD THE DATA REQUIRED TO REPRESENT THE WORK THE PROGRAM ACTUALLY DOES.
+
+
+================================================================================
+PART 15 — C RECIPES MAPPED TO mylib
+================================================================================
+
+15.1 Choosing a container by access pattern
+
+    dense hot iteration      -> array / frame arena / mu_soa.h
+    small scratch array      -> mu_small_vec.h (stack-inline N, zero malloc)
+    non-owning view          -> mu_span.h
+    stable handles + holes   -> mu_bulk_storage.h (+ generations)
+    dense active ids, range  -> mu_sparse_set.h
+    fast point lookup map    -> mu_swiss_map.h (mu_swiss_map: SIMD H2 group)
+    fast iteration + lookup  -> mu_swiss_map.h (mu_dense_map: contiguous SoA!)
+    pod open-addressed map   -> mu_hash_table.h (mu_hash32 / mu_hash64)
+    static sorted search     -> mu_eytzinger.h (mu_eytzinger_u32 / mu_stree16_i32)
+    static set membership    -> mu_xor_filter.h (mu_xor8_filter / mu_bfuse8_filter)
+    dynamic existence filter -> mu_bloom.h (mu_bloom_simd256 split-block AVX2)
+    key -> many values       -> mu_multi_index.h / mu_csr.h
+    packed booleans (dense)  -> mu_bitset.h (AVX2 CSA / AVX-512 vpopcntq)
+    packed booleans (sparse) -> mu_hier_bitset.h / mu_roaring_ish (mu_sparse_bitset.h)
+    priority queue / timers  -> mu_four_heap.h / mu_timer_wheel.h (O(1) wheel!)
+    varints & fast hashing   -> mu_fast_codec.h (StreamVByte + AES-NI/wyhash)
+    ranged / contiguous ids  -> mu_id_pool.h
+    variable children per key-> mu_chunked_u32_array.h
+    packed strings           -> mu_string_arena.h / mu_string_pool.h
+    intrusive lists          -> mu_pool_link / mu_index_list / mu_hlist.h
+    cumulative offsets/rank  -> mu_length_index.h
+    quantization / packing   -> mu_bitpacking.h / mu_quantize.h
+    linear / frame / ring    -> mu_arena.h, mu_vm.h (64b VM reserve + magic ring)
+    fixed block / thread slab-> mu_pool.h, mu_slab.h (lockless per-thread slab)
+    variable sizes           -> mu_buddy.h, offset_allocator.h
+    deterministic RNG        -> mu_random.h (mu_pcg32)
+    ECS + transforms         -> mu_ecs.h
+    lock-free SPSC / sync    -> mu_spsc_queue.h, mu_sync.h (seqlock), mu_deferred_free.h
+    worker pool + tasks      -> mu_thread_system.h, mu_task_scheduler.h
+    timing                   -> mu_perf.h (MU_SCOPE_TIMER / mu_time_now)
+
+If a primitive is missing: add a small reusable one under mylib/mu/ with the
+MU_API/MU_STATIC linkage model and mu_malloc-style overrides. Do not add a
+competing container or allocator family to engine code.
+
+15.2 Existence-based update with a sparse set
+
+    static mu_sparse_set damaged;
+    static float health[MAX_ENTITIES];
+
+    for (uint32_t i = 0; i < damaged.count; ) {
+        uint32_t id = mu_sparse_set_at(&damaged, i);
+        if (health[id] <= 0.0f) {
+            /* swap-remove: overwrite with last, or use a separate dead list */
+            mu_sparse_set_remove(&damaged, id);
+            continue;
+        }
+        /* regen logic... */
+        ++i;
+    }
+
+15.3 Bitset-driven iteration
+
+    size_t i = 0;
+    while (mu_bitset_next_set_bit(&visible, &i)) {
+        render(instances[i]);
+        ++i;
+    }
+
+15.4 Generational handles
+
+    mu_weak_handle h = mu_bulk_storage_make_handle(&store, id);
+    /* later, possibly after the object died */
+    Item *it = (Item *)mu_bulk_storage_resolve_handle(&store, h);  /* NULL if stale */
+    if (!it) return;                                  /* boundary check, not inner loop */
+
+15.5 Allocation
+
+    /* frame arena: allocate freely, reset once per frame */
+    mu_arena frame;
+    void *p = mu_arena_alloc(&frame, bytes, 16);
+    /* ... end of frame ... */
+    mu_arena_reset(&frame);
+
+15.6 Timing
+
+    #include "mu/mu_perf.h"
+    MU_SCOPE_TIMER("movement");
+    /* prints "movement: 0.123 ms" when the scope exits */
+
+15.7 Parallel map
+
+    /* fn: void (*)(uint32_t begin, uint32_t end, uint32_t worker_index,
+                    void *user) */
+    mu_sched_parallel_for(sched, 0, count, /*grain=*/1024,
+                          MU_SCHED_PRIORITY_NORMAL, integrate_worker, &params);
+    mu_sched_wait_idle(sched);
+
+    /* or submit individual tasks against a counter, then wait on it */
+    mu_sched_task_desc d = { .fn = worker, .user = &params,
+                             .priority = MU_SCHED_PRIORITY_NORMAL,
+                             .completion_counter = &counter };
+    mu_sched_submit(sched, &d);
+    mu_sched_counter_wait(&counter);
+
+15.8 The transform signature convention
+
+    void system_update(/* rw */ Vec3 * MU_RESTRICT positions,
+                       /* r  */ const Vec3 * MU_RESTRICT velocities,
+                       size_t count, float dt);
+
+    - read-only input, read/write state, write-only output
+    - restrict on non-aliasing pairs
+    - explicit count
+    - free function over tables, not a method
+
+15.9 Build flags
+
+    cc -std=c99 -O2 -Wall -Wextra -Werror -fno-strict-aliasing -march=native \
+       -D_POSIX_C_SOURCE=199309L
+
+    -O3 + -fopt-info-vec to check vectorization
+    -S / Compiler Explorer to read the hot 5% assembly
+
+
+================================================================================
+PART 16 — CHEAT SHEETS
+================================================================================
+
+16.1 The design checklist
+
+    LAYOUT
+      [ ] hot loop touches only the data it needs
+      [ ] SoA/AoS chosen from the access pattern
+      [ ] hot and cold data separated
+      [ ] no pointers inside hot rows; ids/handles only
+      [ ] atomic values; no nullable members
+
+    CONTROL FLOW
+      [ ] no branches on random data in hot loops
+      [ ] state is existence, not flags
+      [ ] no enum-as-flow dispatch in hot paths
+      [ ] predictable branches or branchless selects
+
+    MEMORY
+      [ ] sequential or strided access; no pointer chasing
+      [ ] restrict/ownership explicit
+      [ ] swap-remove when order is free
+      [ ] regular counts/alignment for vectorization
+
+    ALLOCATION
+      [ ] one allocator strategy per region
+      [ ] stack usage bounded
+      [ ] handles carry generations
+
+    CONCURRENCY
+      [ ] one writer per datum
+      [ ] local accumulators, one final reduce
+      [ ] no false sharing
+      [ ] inactive reuse, not delete-while-referenced
+
+    PROCESS
+      [ ] before/after measurement recorded
+      [ ] hot-path assembly inspected
+      [ ] compiles warning-clean
+      [ ] missing primitives added to mylib
+
+16.2 Formulas and models
+
+    SSA-style:              x0 = input ; x1 = f(x0) ; x2 = g(x1)
+    memory dependency:      address(B) = f(result(A))  =>  B waits for A
+    sequential array:       address(i) = base + i*stride  =>  predictable
+    transform:              output[i] = F(input[i])
+    ideal stream:           READ -> COMPUTE -> WRITE
+    prefix sum:             prefix[i] = sum(0..i)
+    parallel reduce depth:  O(N) -> O(log N)
+    associativity:          (A op B) op C == A op (B op C)
+    performance:            computation + memory traffic + cache + branch + sync
+    cache line:             64 B = 16 ints = 8 doubles = 16 floats = 512 bits
+    LOD:                    representation = f(relevance)
+    collective:             N entities -> 1 record + count
+    memento:                M = Encode(high_detail) ; detail = Decode(M)
+    JIT memento:            detail = Generate(Hash(entity_id))
+    grid:                   index = y*width + x ; x = index%width ; y = index/width
+    stack representation:   N identical -> one type + count
+
+16.3 The named techniques
+
+    existence-based processing        finite state machines as tables
+    don't use bools/enums             transition buffers / evaluate-then-commit
+    table membership = type           index on demand / JIT index
+    dynamic runtime polymorphism      bloom filter
+    component-oriented development    bitset / bit twiddling decision tables
+    hierarchical LOD                   prefix sum
+    collective LOD                     map / filter / reduce
+    mementos / JIT mementos           spatial partitioning
+    spatial mementos                   sorting networks / branchless
+    derived vs explicit state          radix / counting sort / partial sort
+    structs of arrays                  cache-line utilization / presence masks
+    stream processing                  false-sharing avoidance / local accumulate
+    read-only / rw / write-only        non-temporal stores / prefetch
+    table joins as intersections       SoA-friendly auto-vectorization
+    dirty flags -> work lists          handles with generations / arenas
+    object -> components               thread-local ownership / inactive reuse
+
+16.4 The glossary (short)
+
+    entity      an id; its components define it
+    component   data attached to an id
+    system      a transform over component tables
+    table       a homogeneous, contiguous collection consumed together
+    normalize   remove dependency/duplication from the data model
+    memento     compressed history needed for future refinement
+    JIT memento state regenerated from a seed instead of stored
+    SoA / AoS   structure of arrays / array of structs
+    restrict    promise that two pointers do not alias
+    RVO         return value optimization (construct in place)
+    MLP         memory-level parallelism (overlapping independent misses)
+    false share independent variables sharing one cache line
+
+16.5 The one-liners
+
+    Program = data + transformation.
+
+    Don't organize data because it belongs to the same noun;
+    organize it because it is processed together.
+
+    Don't ask "does this object do something?";
+    store "these objects do something."
+
+    The wheat doesn't have positions; the positions have wheat.
+
+    Don't build an object because the thing has a name;
+    build the data required to represent the work the program actually does.
+
+    LOD is the resolution of existence, not polygon count.
+
+    Don't make shared memory safe; design so sharing isn't required.
+
+    Look at the data first. Then choose the algorithm.
+
+    Make data flow simple enough that the CPU and compiler can see
+    the independence you already know.
+
+    The compiler can eliminate instructions.
+    It cannot rescue a fundamentally poor data layout.
+
+
+================================================================================
+PART 17 — DESKTOP x86-64 MICROARCHITECTURE, VIRTUAL MEMORY & HARDWARE HAZARDS
+================================================================================
+
+17.1 What a modern desktop core actually looks like inside
+
+A modern x86-64 desktop core (Intel Ice Lake / Alder Lake / Raptor Lake, AMD
+Zen 4 / Zen 5) is a massive out-of-order dataflow machine:
+
+    Front-end:    6–8 macro-ops/cycle from DSB (uop-cache, ~2.25K–4K uops)
+    ROB / Window: 256–512+ uops in flight simultaneously
+    SIMD / FMA:   2x 256-bit (or 512-bit) FMA/cycle, 4-cycle latency
+    Loads/Stores: 2–3x 256-bit loads/cycle + 1–2x 256-bit stores/cycle
+    L1d Cache:    32–48 KiB, 8–12 way, 64B line, ~4–5 cycles, 10–16 MSHRs
+    L2 Cache:     1–2 MiB per core, ~12–14 cycles
+    L3 Cache:     16–64 MiB shared, ~35–45 cycles
+    DRAM:         ~70–100 ns (~200–300 cycles)
+
+Every stall in hot C code traces back to starving one of those units:
+
+    1. Serial FMA/ALU dependency chain:
+       Latency = 4 cycles, Throughput = 2/cycle -> Little's Law requires
+       4 * 2 = 8 INDEPENDENT accumulators in flight! One scalar `sum += a[i]*b[i]`
+       uses 12.5% of the FPU (proven in perf_test: 20.20x speedup with 8x AVX2!).
+    2. Polynomial Horner vs Estrin:
+       Horner `((c3*x + c2)*x + c1)*x + c0` has serial FMA depth N.
+       Estrin `(c0 + c1*x) + (x*x)*(c2 + c3*x)` cuts depth to log2(N) (1.74x!).
+    3. Integer division (`div`/`idiv`):
+       Not pipelined (~10–18 cycles), zero SIMD `vdiv` instruction.
+       - Power of two: `x & (cap - 1)`
+       - Arbitrary bucket `[0, d)`: Lemire `fastrange32` `((u64)h * d) >> 32` (11.48x!)
+       - Exact runtime `x % d`: Lemire `fastmod` / Mesa `fast_urem` (2.98x!)
+       - Batched float reciprocals (Agner Fog / Montgomery):
+         `inv_ab = 1.0f / (a * b); inv_a = inv_ab * b; inv_b = inv_ab * a;`
+
+17.2 Store-to-Load Forwarding (STLF) & 4K Aliasing Hazards
+
+Recent writes sit in the Store Buffer (~56–72 entries) before hitting L1d. A
+subsequent load from that address forwards in ~4 cycles ONLY IF the load's byte
+span lies completely inside ONE single prior store:
+
+    BAD (STLF stall, ~11.5 cycles — 4.29x slower in perf_test!):
+        p32[0] = lo; p32[1] = hi;
+        uint64_t x = *(uint64_t *)p32;   /* spans TWO 32-bit store entries! */
+
+    GOOD (2.7 cycles):
+        uint64_t x = ((uint64_t)hi << 32) | lo;
+        *p64 = x;
+
+4K Aliasing: Intel's fast store-buffer check compares only address bits [11:0]
+(`addr & 4095`). Streaming `dst[i] = f(src[i])` when `(dst - src) % 4096 == 0`
+triggers false store-forwarding stalls on every iteration! Offset scratch
+arrays by +64 or +128 bytes.
+
+17.3 Set-Associativity Thrashing & Power-of-2 Strides
+
+In a 48 KiB 12-way L1d cache (`64 sets * 12 ways * 64B`), bits `[11:6]` select
+the cache set (`stride % 4096`). Stepping down a column of `float mat[1024][1024]`
+(`4096 bytes/row`) maps EVERY row onto set #0, turning 48 KiB into 768 bytes!
+Fix: pad row pitch by +64 bytes (`float mat[1024][1024 + 16]`) or tile in
+Morton Z-order (`_pdep_u32` + Fabian Giesen dilated increment:
+`mx_next = (mx - 0x55555555u) & 0x55555555u` — 1.37x faster on 256 MB RGBA32F!).
+
+17.4 Hardware Prefetchers, 4 KB Page Stops, MSHRs & Non-Temporal Stores
+
+- Hardware L1/L2 prefetchers track ~8–16 linear streams, and STOP cold at every
+  4 KB virtual page boundary! Advise `madvise(arena, size, MADV_HUGEPAGE)` so
+  2 MB hugepages give 512x larger DTLB reach and 32,768 uninterrupted cache lines.
+- For indirect access `nodes[idx[i]]`, hardware cannot see `idx[i+16]`. Issue
+  `MU_PREFETCH(&nodes[idx[i + 16]])` at `LOOKAHEAD = ceil(DRAM_cycles / iter_cycles)`
+  to keep 10–16 MSHRs busy in parallel.
+- Write-only multi-MB outputs (GPU upload rings, baked geometry) trigger
+  Read-For-Ownership (RFO), reading dead cache lines from DRAM just to overwrite
+  them and evicting your hot L2 tables! Use `_mm256_stream_ps` + `_mm_sfence()`
+  (proven in perf_test: subsequent hot 768 KB L2 table query runs 1.63x faster!).
+
+17.5 Virtual Memory Strategies: ZII, 64-Bit Reserve+Commit & Magic Rings
+
+- Zero Is Initialization (ZII, Casey Muratori): design structs so all-zero bytes
+  are valid; reserve slot `0` in every pool/table as a safe nil sentinel object.
+- 64-Bit Reserve + Commit (`mu: mu_vm.h` `mu_vm_arena`): `mmap(4 GB, PROT_NONE)`
+  reserves contiguous virtual addresses at ZERO physical RAM cost; commit pages
+  via `mprotect(PROT_READ|PROT_WRITE)` as arrays grow -> zero `realloc` copies,
+  permanent pointer/index stability!
+- Double-Mapped Magic Ring (`mu: mu_vm.h` `mu_vm_ring`): map the same `memfd`
+  twice adjacently at `[base, base+cap)` and `[base+cap, base+2*cap)`. Wrap-around
+  reads and AVX2 loads become 100% linear with zero branches or split `memcpy`
+  (proven in perf_test: 2.79x faster!).
+
+17.6 Front-End Pipeline, Critical-Path Dataflow & Undocumented Silicon Effects
+
+- Decoupled Fetch-Directed Instruction Prefetching (FDIP — Reinman et al.'99):
+  Modern branch predictors + BTBs run far ahead of I-fetch as an autonomous
+  instruction prefetcher. In huge OOP/service binaries, BTB misses stall the
+  front end before L1d even matters (Google `AsmDB` / Kanev ISCA'15).
+- Decoded uOp Cache (`DSB` / AMD Op Cache) & Intel JCC Erratum:
+  Hot loops run from the decoded uOp cache (`6–8+` uops/cycle) instead of legacy
+  x86 decode (`MITE`, `4–5` wide). On Skylake/Cascade Lake, branches crossing or
+  ending on a `32B` boundary trigger the JCC microcode erratum, evicting the line
+  from the DSB (`-mbranches-within-32B-boundaries`).
+- Critical-Path Dependence Graph Prediction (Fields et al. ISCA'01; ryg Oodle
+  3-stream Huffman; Dougall Johnson M1 DEFLATE):
+  Out-of-order loop cycle count is `max(Critical_Path_Latency, Total_Uops / Width,
+  Max_Port_Pressure)`. Splitting 1 serial bitstream into 3–4 independent streams
+  hides the refill dependency chain; extra table/CRC ops placed OFF the critical
+  chain execute under its shadow at literally ZERO extra cycles!
+- Store-Sets Memory Disambiguation (Chrysos & Emer ISCA'98):
+  Loads speculatively bypass older stores with unknown addresses until a collision
+  trains a Store-Set predictor entry; false aliasing triggers a costly pipeline
+  machine clear (`Machine_Clears.Memory_Ordering`).
+- Undocumented Silicon Quirks (Travis Downs):
+  1. AVX-512 License Transitions: Skylake-X/Cascade Lake suffer a multi-us
+     throttled transition phase before stepping down frequency (Ice Lake+ and
+     AMD Zen 4 double-pumped / Zen 5 full-512b eliminate the license crater).
+  2. Hardware Zero-Store Elimination: Skylake+ optimizes away all-zero cache-line
+     writes in hardware -> NEVER benchmark memory bandwidth with zeroed buffers
+     (fill with `(i & 7) * 0.25f` so bit patterns are non-zero and exact!).
+
+17.7 Cache Inclusion, Adaptive Insertion (`DIP`), Page-Walk Caches & Prefetch Traps
+
+- Inclusive vs Non-Inclusive / Victim LLCs (Jaleel MICRO'10):
+  Inclusive L3 caches evict live L1/L2 lines when L3 sets overflow ("inclusion
+  victims"). Skylake-SP and AMD Zen use non-inclusive / victim L3s, making
+  effective cache capacity `L2 + L3` rather than `L3` alone.
+- Scan-Resistant Insertion (`DIP` / Set-Duelling / RRIP — Qureshi ISCA'07):
+  Hardware uses bimodal insertion (inserting streaming lines near eviction) so
+  one streaming pass does not flush a smaller hot table in LLC.
+- Page-Walk Caches (`PWC` — Barr ISCA'10):
+  CPUs cache upper page-table entries (`PML4/PDPT/PD`), turning a 4-level DTLB
+  miss from 4 memory hops into ~1 hop (~7–30 cycles) — UNLESS sparse random
+  pointers across multi-GB virtual arenas blow out both DTLB and PWC!
+- Blocked-Loop Self-Interference & Tile Copying (Lam, Rothberg & Wolf ASPLOS'91):
+  Tiled matrix/stencil loops suffer sharp speed drops at specific `N` from cache
+  set self-interference across rows; copying the active tile into a contiguous
+  scratch buffer eliminates conflict misses completely.
+- When Software Prefetch HURTS (Lee et al. TACO'12):
+  `__builtin_prefetch` on contiguous/strided arrays wastes load/AGU issue slots,
+  bloats uop count, evicts hot L1 lines when too early, and can MISTRAIN hardware
+  stream prefetchers! Use `MU_PREFETCH` ONLY on irregular/gather/tree hops.
+- Transparent Huge Pages (`THP`) vs `Ingens` (Kwon OSDI'16):
+  Per-arena `madvise(..., MADV_HUGEPAGE)` is great for dense tables, whereas
+  system-wide `THP defrag=always` can stall allocations on synchronous page
+  compaction and bloat RSS on sparse small allocations.
+
+Short version: feed all 8 FMA chains, match store/load widths, pad 4096B row
+strides, keep hot loops inside the DSB uop-cache, copy conflict-prone tiles,
+use `MU_PREFETCH` only on irregular hops, initialize benchmarks with non-zero
+data, and let the MMU eliminate reallocs and ring wrap-arounds.
+
+
+================================================================================
+PART 18 — FULL DESKTOP SIMD: SWAR, BMI2, PCLMULQDQ, AVX2 & AVX-512
+================================================================================
+
+18.1 Layout dictates SIMD: Pure SoA vs Tiled AoSoA8 vs In-Register Transpose
+
+    Pure SoA (1–6 columns, linear scan):
+        float x[N], y[N], z[N];          -> 11.50x over OOP AoS! (mu: mu_soa.h)
+
+    Intel ISPC / Embree / MoonRay Tiled AoSoA8 (6–20 fields, random packets):
+        struct { float x[8], y[8], z[8], nx[8], ny[8], nz[8], u[8], v[8]; };
+        -> 1 unit-stride _mm256_load_ps per field AND 1 local cache block per
+           packet! (proven in perf_test: 3.96x over AoS!)
+
+    Fabian Giesen In-Register 8x8 Transpose (external AoS boundary):
+        Load 8 contiguous __m256 vectors (full cache-line speed, NEVER vgatherdps!)
+        -> unpacklo/hi -> shuffle -> permute2f128 in registers -> compute in SoA!
+        (proven in perf_test: 2.94x faster on 64 KB L2 staging tiles!)
+
+18.2 The Seven Essential Desktop SIMD Idioms (All Proven in perf_test/)
+
+1. Frostbite Prebound P-Vertex Frustum Culling (16.13x — 1.37B boxes/sec):
+   Hoist plane sign checks OUTSIDE the entity loop (`px = nx >= 0 ? max_x : min_x`),
+   FMA 8 AABBs across 6 planes, OR sign bits, `_mm256_movemask_ps` -> 1 visibility
+   byte into `visible_bits[]` with zero branches.
+
+2. Daniel Lemire `vpshufb` 2-Nibble Register LUT (15.59x — 26.5 GB/s):
+   `_mm256_shuffle_epi8(lut, nibble)` is a 32-way parallel 16-entry table lookup
+   in 1 cycle! Intersect `LUT_LO[v & 0xF] & LUT_HI[(v >> 4) & 0xF]` to classify
+   arbitrary ASCII delimiter sets in 5 instructions.
+
+3. `simdjson` `PCLMULQDQ` Prefix-XOR Quote Masking (24.19x — 25.6 GB/s):
+   Eliminate stateful `in_quote ^= (c == '"')` serial loops! Carryless multiply
+   `_mm_clmulepi64_si128(quote_bits, all_ones, 0)` XOR-scans all 64 bits in 1 uop.
+
+4. Stream Compaction / Left-Packing (`simdprune` 21.69x / AVX-512 20.64x):
+   - AVX2: 8-bit `movemask` indexes a 256-entry `_mm256_permutevar8x32_epi32` LUT
+     (8 KB in L1d) + unaligned store + `pos += popcnt(mask)`.
+   - AVX-512: 1 instruction `_mm512_mask_compressstoreu_epi32(out+pos, k, v)`!
+
+5. Lemire / Mula SWAR & AVX2 `vpmaddubsw` Digit Parsing (5.03x — 3.12B ints/s):
+   Pairwise horizontal decimal combine (`*10+1` via `vpmaddubsw`, `*100+1` and
+   `*10000+1` via `vpmaddwd`) parses four 8-digit ASCII integers per AVX2 step.
+
+6. Mula-Kurz-Lemire AVX2 & AVX-512 `vpopcntq` Bitset Popcount (11.51x / 23.72x):
+   Nibble `vpshufb` + Harley-Seal CSA + `vpsadbw` hits 45.9 GB/s on AVX2;
+   Ice Lake / Zen 4 `_mm512_popcnt_epi64` hits 94.7 GB/s (L1 bandwidth limit!).
+
+7. Hardware `_mm256_rsqrt_ps` + 1 FMA Newton-Raphson (6.70x vs `1.0f/sqrtf`):
+   Quake III's `0x5f3759df` suffers XMM<->GPR domain-transfer stalls on modern
+   x86-64; `_mm256_rsqrt_ps` + `y*(1.5 - 0.5*x*y*y)` gives ~23-bit precision across
+   8 lanes in ~8 cycles!
+
+18.3 Three Classic AVX2 / AVX-512 Traps (`vpshufb` Lanes, Tails & `vzeroupper`)
+
+- Trap 1 (128-bit lane wall): `vpshufb`, `vpackusdw`, `vpunpckldq`, `vpalignr`
+  cannot move bytes across bit 127<->128! Use `vpermd`, `vpermq`, or `vperm2i128`.
+- Trap 2 (Scalar tail cleanup): Pad arena/SoA counts to multiples of 8/16 with
+  neutral sentinels so loops have ZERO scalar remainder branches — or on AVX-512
+  use 1 masked tail pass (`__mmask16 k = (1u << rem) - 1; _mm512_maskz_loadu_ps`)
+  to collapse `ZMM -> YMM -> scalar` down to two paths!
+- Trap 3 (Missing `vzeroupper` AVX<->SSE transition penalty): Writing `ymm0–15`
+  or `zmm0–15` marks upper bits "dirty"; the FIRST legacy non-VEX SSE instruction
+  afterward triggers a multi-hundred-cycle hardware state save/restore (blamed
+  on that innocent SSE instruction in `perf annotate`!).
+  * Verify: `perf stat -e other_assists.avx_to_sse,other_assists.sse_to_avx ./bin`
+    (`avx_to_sse` MUST be 0!).
+  * Fix: call `_mm256_zeroupper()` (~1 cycle) before any return/callback that may
+    reach non-VEX SSE code. In inline `asm`, `vzeroupper` clobbers ALL `ymm0–15`
+    (or `"zmm0".."zmm15"` — compilers track `ymm` and `zmm` clobbers separately!).
+    Note: `zmm16–zmm31` (EVEX-only) have NO legacy YMM alias and need no
+    `vzeroupper`; `__attribute__((target(...)))` / `target_clones` emit it
+    automatically UNLESS bypassed by hand-written inline `asm`!
+
+Short version: SIMD isn't just for 4-float math; `vpshufb` LUTs, `pclmulqdq`
+prefix-XOR, and `vpermd`/`vpcompressd` left-packing turn branch-heavy parsers,
+filters, and data structures into 20+ GB/s branchless pipelines.
+
+18.4 Special-Purpose Desktop Silicon, Loop Tiling & Compiler/ABI Unlockers
+
+1. Loop Interchange (`i-k-j`) & `4x16` Register Micro-Kernels (GotoBLAS/BLIS):
+   - Swapping TWO lines of `256x256` matrix multiply from `i-j-k` to `i-k-j`
+     makes both `B` and `C` unit-stride: `1.70 -> 32.94 GFLOP/s` (20.07x!).
+   - Holding a `4x16` (`8 YMM` registers) output tile across an L1 `KC=64` strip
+     hits `72.11 GFLOP/s` on ONE core (44.13x faster!).
+2. Non-Cryptographic Use of `AES-NI`, Fused `VPCLMULQDQ+CRC32C` & `GFNI`:
+   - `FNV-1a` hashes 1 byte per 3 cycles (`~700 MB/s`). A single `_mm_crc32_u64`
+     chain hits a 3-cycle latency wall (`~3–8 GB/s`); 3 interleaved `crc32q`
+     lanes (+ `PCLMULQDQ` folding) hit `23.1 GB/s` (32.28x); `wyhash` hits
+     `15.4 GB/s` (20.75x); 4-lane `_mm_aesenc_si128` (MeowHash/`gxhash`) hits
+     `54.8 GB/s` (76.59x); and **Corsix `fast-crc32` (`v3s1_s3` / `v4s5x3` /
+     `v3s2x4`)** fuses 512-bit `VPCLMULQDQ` carryless folding on vector ports
+     with concurrent scalar `crc32q` on integer ports to hit **`64–97 GB/s`**
+     (`94 GB/s` on Xeon 8480+; compile TU with `-mavx512f -mavx512vl -mvpclmulqdq
+     -mpclmul -msse4.2`!).
+   - Ice Lake / Zen 4 `GFNI` `_mm512_gf2p8affine_epi64_epi8` multiplies 64 bytes
+     by an 8x8 GF(2) bit-matrix in ONE 1-cycle instruction (`87.8 GB/s`, 93.20x
+     faster than scalar bit-reversal!).
+3. `StreamVByte` SIMD Varint Compression & Associative `pshufb` DFAs:
+   - Separating 2-bit length tags from data bytes lets 1 `_mm_shuffle_epi8`
+     decode 4 variable-length `uint32`s in 1 cycle (`5.64B ints/s`, 43.93x faster
+     than Protobuf `LEB128`!).
+   - Representing `<= 16`-state FSM transitions as 16-byte vectors turns state
+     machine execution into associative function composition `_mm_shuffle_epi8(Tb, Ta)`
+     (`3.64 GB/s`, 8.84x faster than `state = dfa[state][c]`!).
+4. Compiler, ABI, Multi-Versioning, Cold Outlining & Post-Link Unlockers:
+   - Target ISA comes FIRST: no `-O` level (`-O2`, `-O3`, `-Ofast`) changes the
+     target instruction set! Without `-march=x86-64-v3` / `-march=native` (or
+     `-mcpu=` on Arm), x86-64 emits baseline 2003 SSE2. On AVX-512 parts, pass
+     `-mprefer-vector-width=512` when 512-bit throughput wins.
+   - Runtime CPU Multi-Versioning — Know the Traps (`cpu-dispatch`):
+     * Mechanism A (`__attribute__((target_clones("default","avx2,fma","avx512f")))`):
+       ONLY works on **plain auto-vectorized C** (does NOT widen `_mm256_*`
+       intrinsics!), MUST be **non-`static`** AND **`__attribute__((noinline))`**
+       so GCC/Clang emit the IFUNC `.resolver` (`objdump -t bin | grep .resolver`),
+       and GCC `target_clones` **rejects** `"x86-64-v3"`/`"v4"` strings! Avoid
+       IFUNCs inside `.so` shared libraries (early relocation init-order hazard).
+     * Mechanism B (`__builtin_cpu_supports` + `static __attribute__((target(...)))`
+       per-ISA functions, or separate `.c` TUs): required for hand-written
+       intrinsics and safe in `.so` libraries (check widest tier first: `"x86-64-v4"`
+       -> `"x86-64-v3"` -> `"x86-64-v2"` -> scalar; on Arm Linux query
+       `getauxval(AT_HWCAP)`). Watch exact feature flags: `_mm512_popcnt_epi8/16`
+       requires **`avx512bitalg` + `avx512bw`** (`avx512vpopcntdq` only covers
+       32/64-bit `epi32/64`!).
+   - Cold-Path Callee Outlining & Branch Probability Verification:
+     * Annotate error/logging/corrupt-input callees `__attribute__((cold))` (or
+       `[[gnu::cold]]`) at the **function DEFINITION** (declaration-only is a
+       no-op, and coldness does NOT propagate automatically to sub-callees!).
+       This moves cold code past the hot caller's `ret`, shrinking L1i footprint.
+     * Verify `< 0.1%` branch taken rate on Intel via `perf record -c 1000 -e
+       '{BR_INST_RETIRED.NEAR_TAKEN:upp,BR_INST_RETIRED.NOT_TAKEN:upp,cycles:u}'`
+       (apply **macrofusion correction**: when x86 fuses `cmp/test + jcc`, PMU
+       places taken/not-taken counts on the `cmp`, so shift them to the jump!),
+       or workload-free on any arch via GCC `-g -fdump-tree-profile_estimate-lineno
+       -dumpdir dump/` (`*.profile_estimate` `[X.XX%]`).
+   - Floating-Point Reassociation without Full `-ffast-math` UB: `-fassociative-math
+     -fno-signed-zeros -fno-trapping-math` + `-ffp-contract=fast` unlocks SIMD
+     FP reductions and FMA without `-ffinite-math-only` undefined behaviour on NaN!
+   - SysV Linux x86-64 passes trivial POD structs `<= 16B` in 2 registers; `> 16B`
+     spills via `sret` (Win64 passes ONLY `{1,2,4,8}`B in registers!). Under the
+     Itanium C++ ABI, ANY non-trivial destructor/copy-ctor forces stack passing by
+     hidden pointer ("There Are No Zero-Cost Abstractions", Chandler Carruth'19).
+   - `__builtin_assume_aligned(p, 64)` + `if (n & 7) __builtin_unreachable()`
+     eliminates scalar prologue peeling and tail cleanup loops (Arm SVE / AVX-512
+     masked predication removes scalar remainder tails natively).
+   - Direct-threaded VM dispatch (`goto *table[*ip++]`) needs `-fno-gcse
+     -fno-crossjumping` when splitting BTB slots; always measure against plain
+     `switch` because modern `ITTAGE` predictors are strong (Rohou CGO'15), and
+     verify "branchless" C actually emitted `cmov`/`csel` (Lemire'21)!
+   - Pair `llvm-mca` (models ONLY back-end ports assuming 100% L1 hits) with
+     `uiCA` (models x86 front-end/DSB/loop buffer) and `llvm-exegesis` /
+     `uops.info` (counter-measured truth).
+   - Post-Link Binary Layout: `PGO` / `AutoFDO` (sampled LBR/SPE production
+     profiles) + `LLVM BOLT` (link with `-Wl,--emit-relocs`, profile via `perf
+     record -e cycles:u -j any,u`) or `Propeller` (`-fbasic-block-sections=list`)
+     eliminates I-cache, iTLB, and BTB front-end stalls on large binaries.
+
+18.5 CPU Matrix / Quantized Kernels & When CPU Beats GPU (`13-sgemm-naive-vs-blas`)
+
+- Vector Microkernel Ceiling vs Matrix Tiles (`AMX` / `SME2`):
+  A GotoBLAS/BLIS packed register-tile microkernel closes ~87–95% of the gap from
+  naive triple loops to the SIMD FMA peak (`44x`), while dedicated matrix engines
+  (Intel `AMX` `TMUL` tiles — requires Linux `arch_prctl(ARCH_REQ_XCOMP_PERM)` —
+  and Arm `SME2` `ZA` outer-product tiles) add another `4–14x` on top!
+- Quantized `int8` / Low-Bit Dot Products (`VNNI`, `SDOT`, `k-quants`, `T-MAC`):
+  `AVX-512 VNNI` (`vpdpbusd`) and Arm `SDOT`/`I8MM` execute `4x` more MACs per
+  instruction than `f32` FMA while cutting memory traffic `4x` (note pre-VNNI
+  AVX2 `vpmaddubsw` saturates signed `int16`, requiring `u8 * i8` + zero-point
+  compensation). For `<= 4`-bit weights (`ggml` `k-quants`, `T-MAC`), `vpshufb`
+  bit-sliced LUTs avoid unpacking/multiplying weights altogether.
+- Batch-1 Bandwidth Law:
+  At batch 1, matrix-vector decode reads every weight once for 2 ops (`~1–2`
+  FLOP/B) -> strictly DRAM-bandwidth bound (`rate ~= BW_DRAM / model_bytes`).
+  Once physical cores saturate the memory controllers (often `4–8` threads per
+  CCD/socket; SMT siblings OFF; weights NUMA-local), adding cores or a GPU on the
+  same memory bus gains nothing (`llama.cpp` / `SparAMX`).
+
+18.6 The 10-Step "Zipper Algorithm" for SIMD Width Upconversion & Fused Distance Kernels
+
+1. Systematic SIMD Width Upconversion (`XMM -> YMM` or `YMM -> ZMM` "Zipper"):
+   When widening hand-written SIMD assembly/intrinsics, direct naive doubling
+   corrupts flags or reads past array ends. Follow Intel's 10-step Zipper:
+     (1) Convert legacy 2-op SSE (`addps`) to 3-op VEX (`vaddps`) & tag integer
+         flag liveness (`produced` / `consumed` / `clobbered`).
+     (2) Replicate the original narrow loop unchanged as the fallback before the
+         scalar tail (prevents silent OOB reads on `count % wide != 0`!), and
+         switch `vmovaps` -> `vmovups` unless 32B/64B alignment is guaranteed.
+     (3) Unroll the primary loop 2x and double its entry/exit count check.
+     (4) Rename 2nd-half vector destinations `ymm0..15 -> ymm16..31`.
+     (5) Pairwise "zipper" swap 2nd-half ops upward beneath their 1st-half twins
+         (when crossing `add $32, %ptr`, add `+32` to the load/store displacement!).
+     (6) Consolidate paired integer pointer updates (`add $32` + `add $32` -> `$64`).
+     (7) Merge paired narrow vectors (`vmovups 0` + `vmovups 32` -> `zmm`),
+         verifying signed/unsigned (`vpmovsx`/`zx`, `vpsrad`/`vpsrld`) and
+         intra-128b-lane shuffles (`vshufps`/`vpshufb`) vs cross-lane `vpermd`!
+     (8) Promote loop-invariant constants (`vbroadcastss` or `vinsertf64x4 $1`).
+     (9) Fold wide accumulators (`vextractf64x4 $1` or `_mm512_reduce_add_ps`).
+     (10) Update asm clobbers, CPUID guard, and `vzeroupper` (or AVX-512 `{z}` mask tail).
+2. Single-Pass Multi-Accumulator Distance Kernels (`Cosine`, `Hamming`, `Jaccard`):
+   - `Cosine similarity`: NEVER make 3 passes (`dot(A,B)`, `|A|`, `|B|`); fuse
+     `dot_ab`, `dot_aa`, `dot_bb` into ONE pass with 4 SIMD FMA accumulators per
+     stream (`12 YMM/ZMM` regs -> `dot_ab / sqrtf(dot_aa * dot_bb)`, skipping
+     norms if inputs are pre-normalized!).
+   - `Hamming` & `Jaccard` (`IoU`): compute `AND` + `OR` popcounts simultaneously
+     in ONE memory pass (`4-acc popcntq` `~24 GB/s`, AVX2 Harley-Seal `27–38 GB/s`,
+     AVX-512 `vpopcntq`/`bitalg` `65–91 GB/s`). If `popcnt(A)` and `popcnt(B)`
+     are stored alongside the bitsets, `popcnt(A|B) = popA + popB - popcnt(A&B)`
+     eliminates the `OR` stream completely (`mu: mu_bitset.h`)!
+
+
+================================================================================
+PART 19 — MODERN HIGH-PERFORMANCE DATA STRUCTURES
+================================================================================
+
+19.1 Hash Maps: Abseil AVX2 SwissTable vs `ankerl::unordered_dense`
+
+Never use node-allocated chained hash maps (`std::unordered_map`). Pick by ratio
+of point lookups vs iteration (`mu: mu_swiss_map.h`, `mu_hash_table.h`):
+
+    AVX2 SwissTable (`mu_swiss_map` — 6.44x faster than `mu_hash32` % cap!):
+      - Flat `uint8_t ctrl[cap + 32]` storing 7-bit H2 (`hash >> 57`) or `0x80` EMPTY,
+        `0xFE` DELETED (`was_never_full` skips tombstones on erase when group has
+        an EMPTY slot!).
+      - `_mm256_cmpeq_epi8` / `_mm_cmpeq_epi8` tests 16–32 slots in 1 cache line!
+      - Mix integer keys with 64-bit `wyhash` multiply-xor, never identity.
+
+    `ankerl::unordered_dense` (`mu_dense_map` — 178.17x faster iteration!):
+      - Keys & values live in contiguous `keys[0..n]`, `vals[0..n]`.
+      - Flat metadata buckets store `{ h2, uint32_t dense_index }`.
+      - Erase is O(1) swap-remove; iteration is a pure unit-stride SoA scan!
+
+19.2 Static Sorted Search: Why Plain CMOV Fails, Eytzinger & 16-Ary AVX2 S+Tree
+
+Empirical shock from perf_test (`bench_highperf_ds.c` & `mu_eytzinger.h`):
+    - Branchy `std::lower_bound` (22 hops, 16 MB):    271.9 ns
+    - Plain Branchless `CMOV` Binary Search:          271.1 ns  (1.00x — NO GAIN!)
+    - Eytzinger 1-Based BFS + Prefetch (`mu_eytzinger`):45.9 ns (5.92x FASTER!)
+    - 16-Ary Cache-Line AVX2 S+Tree (`mu_stree16_i32`):27.8 ns  (9.79x FASTER!)
+
+WHY did plain CMOV give 1.00x? Because on out-of-L2 arrays, a branch lets the
+CPU speculatively predict and issue the next memory load ahead of time, whereas
+`CMOV` turns control dependency into a strict DATA dependency, freezing the next
+load until the current DRAM miss finishes! Note Khuong & Morin (`Array Layouts
+for Comparison-Based Searching`, PVLDB'17): the winning layout shifts by working
+set size (branchless sorted in L1, Eytzinger + explicit prefetch in L2/L3, and
+cache-line B-tree / 16-ary S+Tree once DRAM latency dominates!).
+- Eytzinger (`mu: mu_eytzinger.h`) puts root at `a[1]`, children at `2k` and
+  `2k+1`, letting `MU_PREFETCH(&a[k * 16])` keep 4 DRAM hops in flight in MSHRs.
+- Slotin's 16-ary AVX2 S+Tree (`mu: mu_eytzinger.h` `mu_stree16_i32`) packs 16
+  `int32` keys (exact 64B cache line) per implicit B-tree node (`child = node*16
+  + 1 + popcnt(cmp_mask)`), slashing 20–22 serial hops down to 5–6!
+
+19.3 Linux Maple Tree, XArray, HierBitset, Split-Block Bloom & Xor Filters
+
+- Linux Maple Tree & XArray (`mu: mu_interval_map.h`, `mu_radix_tree.h`):
+  256B cache-aligned B-tree/radix nodes (branching 16–64) replacing pointer
+  red-black trees in the Linux VM subsystem.
+- 4-Level 64-Ary Hierarchical Bitset (`mu: mu_hier_bitset.h`):
+  Summary words `L0 -> L1[64] -> L2[4096] -> L3[262144]` skip 262,144 zeros in
+  1 `tzcnt` (318.68x faster on sparse 16.7M-ID domains!).
+- AVX2 Split-Block Bloom Filter (`mu: mu_bloom.h` `mu_bloom_simd256` — 8.31x
+  faster than scalar 6-probe `mu_bloom`, `2.44 ns/query`!):
+  All 8 hash bits map inside ONE 32-byte AVX2 word tested via 1 `_mm256_testc_si256`
+  (1 cache miss max instead of 6!).
+- Static `Xor8` & `Binary Fuse 8` Filters (`mu: mu_xor_filter.h` — 5.37x faster,
+  `9.84` / `9.0` bits/key, 38%+ smaller than Bloom): peels a 3-way hypergraph so
+  queries do 3 independent MLP array loads (`fp[h0] ^ fp[h1] ^ fp[h2]`).
+
+19.4 SmallVector, Linux `hlist_node`, Radix FloatFlip, 4-Heap & Timer Wheels
+
+- LLVM `SmallVector<T, 8>` (`mu: mu_small_vec.h`): inline stack array avoids
+  97%+ of scratch heap calls (1.59x–10x faster).
+- Linux `hlist_node` (`mu: mu_hlist.h`, `struct hlist_node *next, **pprev;`):
+  8-byte bucket head (half of `{head, tail}`) + zero head-branch on unlink (1.59x).
+- Terdiman 1-Scan Histogram + 4/8-Pass LSD Radix Sort (`mu: mu_sort.h`): builds
+  all byte histograms in 1 read pass (`u32` AND `u64`!), skips uniform byte
+  passes, and sorts IEEE-754 floats via `FloatFlip` (`mu_radix_sort_f32_scratch`:
+  `7.73 ns/key`, **18.67x** faster than `qsort`!).
+- In-Place SIMD Quicksort / Quickselect (`numpy/x86-simd-sort`): when `O(N)`
+  radix scratch memory is unwanted or `nth_element` (`qselect`), `partial_sort`
+  (`partial_qsort`), or `argsort` is needed on `f32/f64/i32/u32/i64/u64`, AVX-512
+  `vcompressps`/`vpcompressd` partitioning + bitonic sorting networks beat
+  `std::sort` by **`3–8x`** (`2–4x` on AVX2). Caveats: NOT stable; passing NaN
+  with `hasnan=false` is **UB**; `qsort(..., hasnan=true)` rewrites NaN payloads
+  to `quiet_NaN` (and `argsort` silently degrades to scalar `std::sort` on NaN!).
+- SoA 4-Ary Heap (`mu: mu_four_heap.h`, **2.25x** over AoS binary heap) & O(1)
+  Hierarchical Hashed Timer Wheel (`mu: mu_timer_wheel.h`, **15.42x** faster:
+  4x 64-slot `uint64_t` occupancy bitmasks find next expiry in 1 `tzcnt`!).
+- Contiguous CSR (`mu: mu_csr.h`) beats pointer graphs by 32.72x!
+- Roaring Bitmaps (`mu: mu_sparse_bitset.h` / `mu_chunked_bitset.h`): partition
+  32-bit IDs into `65,536`-wide chunks stored as sorted `uint16[]` (`< 4096`) or
+  `8 KB` `uint64[1024]` bitsets (`>= 4096`) -> 209.45x faster set intersection!
+- Fast SIMD Codec & Hashing (`mu: mu_fast_codec.h`): `StreamVByte` 2-bit tag
+  varint codec + 4-lane `AES-NI` / `wyhash` (`mu_hash_bytes_fast`: `54.3 GB/s`,
+  **74.85x** faster than FNV-1a!).
+
+
+================================================================================
+PART 20 — WHAT THE GREAT CODEBASES & PIONEERS ACTUALLY DO
+================================================================================
+
+  * Mike Acton (Insomniac): Strip cold fields (`7.07x`), design for arrays of
+    many rather than single objects, compute cache-line waste before coding.
+  * Richard Fabian (DOD Book): Existence tables (`121.72x`), 1NF relational
+    tables, transition-buffered FSMs, relevance LOD & JIT mementos.
+  * Casey Muratori: Kill vtables (`55.32x`), ZII, 64-bit VM reserve+commit,
+    double-mapped magic rings (`2.79x`), ILP accumulators, repetition testing.
+  * Agner Fog: `Latency * Throughput = 8` FMA accumulators (`20.20x`), Estrin's
+    polynomial tree (`1.74x`), Montgomery batched reciprocals, uop-cache sizing.
+  * Fabian Giesen (ryg / RAD): Branchless 64-bit bitstream refill (`4.78x`),
+    dilated Morton stepping (`1.37x`), 8x8 SIMD transpose (`2.94x`), STLF rules.
+  * Daniel Lemire: `fastmod`/`fastrange32` (`11.48x`), `vpshufb` nibble LUT
+    (`15.59x`), `pclmulqdq` quote mask (`24.19x`), `simdprune` (`21.69x`),
+    `vpmaddubsw` digit parse (`5.03x`), Split-Block Bloom & Xor filters.
+  * Mesa 3D (NIR / Gallium): `ralloc`/`linear_alloc` pass arenas (`6.12x`),
+    `slab_child_pool` per-thread pools (`932.84x`), `fast_urem_by_const`,
+    `u_vector` unmasked power-of-2 ring, dirty-bitmask `tzcnt` validation.
+  * Linux Kernel: Maple Tree (256B B-tree), XArray, SLUB lockless per-CPU slab,
+    `seqlock` (`27.44x`), `kfifo`/`io_uring` rings (`127.12x`), `hlist` `**pprev`.
+  * Naughty Dog: Pinned physical-core threads + 160x 64KB user-space fibers
+    (`8.58 ns` switch = `1,301.95x` faster than OS wake) + triple frame arenas.
+  * EA Frostbite: Prebound P-vertex SoA AVX2 culling (`16.13x`), FrameGraph
+    transient memory aliasing (`30–50%` RAM saved), 64-bit radix draw keys.
+  * Valve (Migdalskiy & Ericson): Explicit MSHR prefetching, 6-byte quantized
+    `uint16` AABBs, CSR graphs (`32.72x`), linear Morton BVHs.
+  * id Software: `_mm256_rsqrt_ps` + 1 NR (`6.70x`), swizzled virtual textures,
+    decoupled render-packet snapshots.
+  * Intel (ISPC / Embree / MoonRay): `AoSoA8`/`AoSoA16` tiles (`3.96x`), wide
+    SIMD `BVH4`/`BVH8`, non-temporal `_mm256_stream_ps`, AVX-512 `vpcompressd`.
+  * LLVM (`llvm/ADT`): `SmallVector`, `SmallPtrSet`, flat `DenseMap`,
+    hash-cached `StringMap`, `PointerIntPair` low-bit tagging, `ArrayRef`.
+
+
+================================================================================
+PART 21 — QUANTITATIVE PERFORMANCE MODELS, TOP-DOWN TMA & BENCHMARKING SCIENCE
+================================================================================
+
+21.1 Roofline, Stream-Mix Roofs, Cache-Aware Roofline & ECM Overlap Model
+
+A roofline is a physical upper bound built from measured ceilings and counted
+bytes — a point plotted ABOVE a roof means a wrong roof or a wrong byte count,
+never "magic code" (Williams et al. CACM'09; `06-roofline`):
+
+    Operational Intensity:   I = FLOPs / Bytes_moved    (FLOP/B)
+    Roofline Ceiling:        P <= min(P_peak,  I * BW_roof)
+    Ridge Point:             I_ridge = P_peak / BW_roof
+
+    - Below I_ridge (e.g. saxpy: 2 FLOP / 12 B = 0.167 FLOP/B):
+      100% bandwidth-bound. Unrolling arithmetic will NEVER speed it up; shrink
+      bytes moved (SoA, quantization, loop fusion, RFO bypass).
+    - Above I_ridge (e.g. register-blocked GEMM / degree-32 Horner: >= 10 FLOP/B):
+      Compute-bound. Runs at the same rate from DRAM as from L1!
+
+Three essential refinements beyond naive textbook Roofline:
+1. Stream-Mix Specific Memory Roofs (`06-roofline` & McCalpin `STREAM`):
+   Read-only bandwidth != Copy (`1R+1W`) != Triad (`2R+1W`) != Fill (`1W`).
+   Measure all four, and check whether whole-line writes pay Write-Allocate
+   (RFO = `2x` bytes) or use write-streaming / NT stores (`1x` bytes).
+2. Cache-Aware Roofline Model (CARM — Ilic et al. 2013):
+   Original Roofline counts bytes past LLC (`DRAM`). CARM plots one roof per
+   cache level (`L1`, `L2`, `L3`, `DRAM`) against traffic AT THE CORE so an
+   L2-resident kernel is diagnosed against L2 bandwidth, not misread against DRAM.
+3. Execution-Cache-Memory (ECM) Model (Stengel, Hager, Wellein 2015):
+   Roofline assumes cache transfers overlap 100%. On many x86 cores (Intel in
+   particular), data transfers across `L1 <-> L2 <-> L3 <-> RAM` only partially
+   overlap (`T_ECM = max(T_core_OL, T_L1_nOL + T_L2 + T_L3 + T_Mem)`). ECM
+   predicts single-core speed AND the exact core count `N_sat = T_ECM / T_Mem`
+   where socket memory bandwidth saturates!
+
+21.2 Top-Down Microarchitecture Analysis (TMA) & Official Thresholds
+
+Raw PMU counts mislead because out-of-order cores overlap misses and execute
+wrong-path ops. Ahmad Yasin's Top-Down Method (ISPASS'14; Intel `TMA_Metrics-
+full.xlsx` v5.2; `pmu-tools`/`toplev`; AMD Zen `PipelineL1`; Arm Topdown) counts
+PIPELINE ISSUE SLOTS (`Slots = Width * Core_Clocks`) and partitions 100% of
+slots into four mutually exclusive Level-1 buckets:
+
+    Slot =
+      +-- Retiring           (uops that actually committed useful work)
+      +-- Bad_Speculation    (wrong-path uops + recovery bubble slots)
+      +-- Frontend_Bound     (front end delivered nothing while back end ready)
+      +-- Backend_Bound      (no uops delivered due to back-end resource stalls)
+            +-- Memory_Bound (L1_Bound / L2_Bound / L3_Bound / DRAM_Bound / Store)
+            +-- Core_Bound   (Divider / execution port pressure / serial chains)
+
+Official Intel P-Core Level-1 Flagging Thresholds (`TMA_Metrics-full.xlsx` v5.2):
+    - `Frontend_Bound  > 15%` -> Check `Fetch_Latency` (I-cache/iTLB/BTB misses:
+                                 outline cold paths, run BOLT) vs `Fetch_Bandwidth`
+                                 (DSB uop-cache misses, JCC 32B boundary erratum).
+    - `Bad_Speculation > 15%` -> Check `Branch_Mispredicts` (sort, existence
+                                 tables, SIMD masks) vs `Machine_Clears` (4K
+                                 aliasing, memory-ordering disambiguation clears).
+    - `Backend_Bound   > 20%` -> Inspect Level 2:
+                                 * `Memory_Bound` dominant -> SoA, hot/cold split,
+                                   Eytzinger/S+Tree, MSHR prefetch, 2MB hugepages.
+                                 * `Core_Bound` dominant -> break dependency chains
+                                   (8x FMA accumulators), kill `div`/`sqrtf`.
+    - `Retiring        > 70%` -> Pipeline is well-fed — NOW check SIMD width and
+                                 uop count! Scalar code retiring 4 scalar adds/cyc
+                                 reports >75% Retiring while running 8x slower
+                                 than AVX2! (Also check `Heavy_Operations` ucode.)
+
+Run it directly on Linux:
+    Intel: `perf stat -M TopdownL1,TopdownL2 ./bin`  (or `toplev -l3 ./bin`)
+    AMD:   `perf stat -M PipelineL1,PipelineL2 ./bin` (Zen 4/5 kernel `pipeline.json`)
+    Arm:   `perf stat -M TopdownL1 ./bin`
+
+21.3 Deterministic `perf stat`, Profiler Skid (PEBS/IBS/SPE) & Causal Profiling
+
+1. Deterministic Counter Triage Rules (`cpu-perf` MCP):
+   - Always check the `(XX.X%)` running share at the end of `perf stat` lines:
+     if `< 99.9%`, PMU counters were MULTIPLEXED (time-sliced), corrupting ratios
+     on short or phase-changing workloads! Group fewer events per run.
+   - On hybrid CPUs (Intel `cpu_core` P-cores + `cpu_atom` E-cores), NEVER sum
+     or divide P-core cycles by total `task-clock` — keep PMUs strictly separate!
+   - Prefer MPKI (`misses * 1000 / instructions`) alongside miss rate (`misses /
+     references`): a 50% branch miss rate on 0.01 branches/1k insts is harmless;
+     15 LLC MPKI stalls the entire ROB.
+2. Profiler Skid & Precise Hardware Sampling (Travis Downs'19; IBS/PEBS/SPE):
+   - Precise interrupts retire all older ops and fire on the OLDEST UNRETIRED
+     instruction blocking the ROB head (typically a slow DRAM load!). Plain timer/
+     cycle interrupts therefore blame the instruction *at or after* the stall.
+   - Eliminate skid with hardware op-tagging:
+       Intel PEBS: `perf record -e cycles:pp` (or `:ppp` zero-skid)
+       AMD IBS:    `perf record -e ibs_op//` (records op latency + data address!)
+       Arm SPE:    `perf arm-spe` (records load latency, cache level, TLB miss!)
+3. Off-CPU & Causal Profiling:
+   - On-CPU flame graphs (width = sample share, X-axis alphabetical NOT time!)
+     miss threads blocked on locks/I/O — trace off-CPU waits via `bpftrace`.
+   - `Coz` Causal Profiling (Curtsinger & Berger SOSP'15): speeding up a "hot"
+     function off the critical path gives 0% wall-time gain; virtual speedups
+     reveal which line actually moves end-to-end throughput/latency.
+
+21.4 The Seven-Field Evidence Rule & Microbenchmarking Pitfalls
+
+Every performance number is meaningless without ALL SEVEN FIELDS
+(`usamahz/cpu-performance-engineering` admission rule):
+
+    1. CPU model & microarchitecture (+ P-core vs E-core: `14-pcore-vs-ecore`
+       measured 3x–12x speed difference on the exact same binary!)
+    2. Core / thread count used & placement / affinity
+    3. Core frequency (measured, NOT base sticker!), turbo/DVFS & SMT state
+    4. Compiler, version & exact flags (`-O2`/`-O3`, `-march`, `-ffast-math`, LTO)
+    5. Workload (exact data distribution & byte size vs L1 / L2 / L3 capacity)
+    6. Explicit baseline
+    7. Measurement method (timer, warmup, `REPS >= 10..30`, statistic + spread)
+
+Six classic microbenchmarking lies and how to defeat them:
+1. Dead-Code Elimination & Purity Hoisting (`05-measurement-pitfalls`, `13`):
+   Unused results optimize to `0 ns` (two adjacent `clock_gettime` calls!).
+   Consume every output with `SINK(x)` (`__asm__ volatile("" : : "r,m"(x) :
+   "memory")`), verify against an independent closed-form/hash checksum, AND
+   pass L1-loop input pointers through `OPAQUE(p)` (`__asm__("" : "+r"(p))`)
+   each repetition so the compiler cannot prove purity and hoist the call!
+2. Single-Run Fallacy & Paired Round-Robin Sampling (`05`, `08`):
+   Single runs of identical code differ by `>2%` in 20–25% of pairs! Run
+   `REPS >= 21..31` after a 100–300 ms DVFS spin warmup, interleave variants in
+   seeded RANDOM ORDER per round, and compute PAIRED ratios (`v_i / base_i`)
+   within each round so DVFS clock steps cancel out.
+3. Verification Cache Pollution (`08-autovectorization-aliasing`):
+   Running `memcmp` over 5 reference arrays between L1 samples evicted L1d and
+   made whichever variant sat in one round-slot 11% slower! Hash only the hot
+   output array outside the timed region.
+4. Link-Order & Environment-Size Bias (Mytkowicz et al. ASPLOS'09):
+   Adding bytes to `ENV` shifts stack alignment (`RSP % 64`) and changing `.o`
+   link order shifts 32B/64B loop alignment, flipping `-O3` vs `-O2`! Align hot
+   functions/loops (`-falign-functions=64`) and test across layouts.
+5. `rdtsc` Counts Reference Time, NOT Core Cycles under DVFS!
+   Modern invariant TSC ticks at a fixed nominal frequency regardless of turbo or
+   throttling. Use `CLOCK_MONOTONIC_RAW` for wall time, and measure true core
+   frequency via PMU `cycles / task-clock` or a 1-cycle dependent integer `add`
+   chain (`clock_estimate.c`, taking `min` of 7 runs: `GHz = adds / min_ns`).
+   Also note Weaver (ISPASS'13): hardware `instructions` counters overcount by
+   +1 per hardware interrupt/page fault (why `nanoBench` runs in ring 0 with
+   interrupts disabled).
+6. Choose the Right Summary Statistic (Fleming & Wallace'86; Hoefler & Belli'15;
+   Gernot Heiser "Benchmarking Crimes"):
+   - Fixed-work floor / short kernel latency -> `minimum` (+ median & CV)
+   - Sustained throughput / bandwidth        -> `median` (+ CV / non-param CI)
+   - Normalized speedups across workloads    -> `geometric mean` (NEVER arithmetic
+     mean of ratios — arithmetic mean of ratios flips winner depending on choice
+     of baseline!)
+   - Quiet Linux host recipe (LLVM): `cpupower frequency-set -g performance`,
+     disable turbo boost or warm for 300 ms, offline/avoid SMT sibling threads,
+     `setarch -R` (disable ASLR), pin to isolated `cset shield`, run on `tmpfs`.
+
+21.5 Structured `perf` Triage, `perf annotate` Pattern Scan & `.so` Version Audit
+
+1. Pre-Flight Hygiene (`intel/linux-perf`):
+   - Verify `/proc/sys/kernel/perf_event_paranoid <= 1` and DWARF debug info
+     (`objdump --dwarf=info bin | grep -c DW_TAG`). If missing, recompile adding
+     **ONLY `-g`** — changing `-O2`/`-O3` or `-D` defines shifts hotspots, and
+     any prior `perf.data` is immediately stale after recompiling (`addr2line -e
+     bin -f -i <addr>` handles inlined frames when needed).
+2. Systematic 7-Pattern `perf annotate --stdio -l <fn>` Scan:
+   - (1) Scalar FP only (`vaddsd`/`vmulsd`/`vfmadd*sd` >50% of samples and zero
+     packed compute ops — ignore register-zeroing `vxorpd` or `vmovapd` moves!):
+     diagnose strided loop or missing `restrict`, then vectorize.
+   - (2) Narrow SIMD (`xmm` on AVX2/AVX-512 CPU, or `ymm` on AVX-512 CPU >20%):
+     widen via compiler `-march` / multi-versioning or the 10-step Zipper (`18.6`).
+   - (3) Serial accumulator (1 FP op >40% + same src/dst reg `vaddss %xmm0, ...,
+     %xmm0` + IPC <0.5 & LLC miss <2%): unroll 4–8 vector accumulators!
+   - (4) Horizontal reduction inside loop (`shufps` / `unpckhps` / `vhaddps`
+     within 3–5 insns of `vmulps` >10%): keep accumulators vertical until loop exit!
+   - (5) Aliasing preamble before loop (`lea` + `cmp` overlap test branching to a
+     scalar copy of the loop): add `MU_RESTRICT`!
+   - (6) Memory load wall (`vmovups`/`movq` >30% with high LLC MPKI): fix layout
+     (SoA, hot/cold split, CSR, Eytzinger/S+Tree).
+   - (7) Outdated system shared-library symbols: e.g., `gcm_init_avx`,
+     `aesni_xts_encrypt`, or pre-3.3 `ossl_aes_gcm_encrypt_avx512` hot in
+     `libcrypto.so.3` -> inspect real `.so` version (`readlink -f` or `openssl
+     version` / `strings libcrypto.so.3 | grep "^OpenSSL 3"`) and upgrade to
+     OpenSSL 3.3+ for Sapphire Rapids+ AVX-512 crypto paths!
+
+Short version: plot intensity against stream-matched Roofline/ECM, triage slots
+with Top-Down TMA (`15/15/20/70%`), sample skid-free with PEBS/IBS/SPE, scan
+`perf annotate` assembly systematically, and never quote a benchmark missing any
+of the Seven Fields.
+
+
+================================================================================
+PART 22 — EMPIRICAL PROOF SCORECARD (perf_test/ Suites 1–7)
+================================================================================
+
+Run `make -C perf_test run-proofs` and `make -C perf_test run-mt-proofs` to
+reproduce on your machine (full tables & flags in `perf_test/PERF_PROOFS.md`):
+
+    Single-Threaded Desktop Proofs (Suites 1–4 & 6):
+      AoS (256B) -> Hot/Cold (24B) -> SoA+AVX2:       7.07x / 11.50x
+      AoS Packet -> Intel ISPC Tiled AoSoA8 AVX2:      3.96x
+      Pointer Graph -> Contiguous CSR (mu_csr):       32.72x
+      Dense bool[1M] -> CTZ Bitset -> Existence:      11.85x / 121.72x
+      STLF 2x32->64 Stall -> Matched 64b Pack:         4.29x
+      Split-Copy Ring -> Double-Mapped Magic VM Ring:  2.79x
+      Vtable -> Switch -> Homogeneous SoA + AVX2:     55.32x
+      50/50 Branch -> Sorted -> Mask -> AVX2:          9.49x / 13.96x / 32.74x
+      1 Scalar Accum -> 8x AVX2 FMA Accumulators:     20.20x
+      x % d (divl) -> Lemire fastmod / fastrange32:    2.98x / 11.48x
+      1/sqrtf -> Quake 0x5f3759df -> AVX2 rsqrt+NR:    1.59x /  6.70x
+      Byte Bitreader -> ryg 64-bit Branchless Refill:  4.78x
+      AoS Frustum Cull -> Frostbite SoA P-Vtx AVX2:   16.13x
+      Multi-Char Scan -> Lemire AVX2 vpshufb LUT:     15.59x (26.5 GB/s)
+      Stateful Quotes -> simdjson PCLMULQDQ + AVX2:   24.19x (25.6 GB/s)
+      Scalar Filter -> simdprune vpermd / vpcompressd:21.69x / 20.64x
+      Chained Hash -> SwissTable Lookup / Dense Iter:  2.40x / 60.19x
+      16MB lower_bound -> Eytzinger / 16-Ary S+Tree:   5.92x /  9.79x
+      Flat 16.7M Bitset -> 4-Level HierBitset:       318.68x
+      libc qsort() -> 1-Hist 4-Pass LSD Radix Sort:   10.14x
+      Naive i-j-k GEMM -> i-k-j / 4x16 AVX2 Tile:     20.07x / 44.13x
+      FNV-1a Hash -> CRC32C / AES-NI (54.8 GB/s):     32.28x / 76.59x
+      Protobuf LEB128 -> Lemire SIMD StreamVByte:     43.93x (5.64B ints/s)
+      8-Probe Bloom (2MB) -> Static Xor8 (1.23MB):     3.42x (+38% smaller)
+      Scalar Bit-Reverse -> AVX2 / GFNI Bit-Matrix:   42.84x / 93.20x (87.8 GB/s)
+      Table DFA -> 4-Stream Associative pshufb DFA:    8.84x (3.64 GB/s)
+      Sorted u32 Merge -> Roaring Hybrid Intersection:209.45x
+
+    Wave 3 `mylib` (`mu/*.h`) Shipped Module Proofs (Suite 7):
+      qsort f32 -> mu_radix_sort_f32_scratch (FloatFlip): 18.67x (7.73 ns/key)
+      8-Scan u64 Radix -> 1-Hist mu_radix_sort_u64:        1.90x (21.59 ns/key)
+      SWAR / popcntq -> mu_bitset_intersection_count:      7.08x / 2.56x (91 GB/s)
+      mu_hash32 (% cap) -> fastrange32 / mu_swiss_map:     1.79x / 6.44x (5.76 ns)
+      mu_hash32 Sparse Scan -> mu_dense_map SoA Scan:    178.17x (2.05 us / 65K)
+      1M Binary Search -> mu_eytzinger / mu_stree16_i32:   2.52x / 4.99x (37.3 ns)
+      mu_bloom (6-probe) -> mu_bloom_simd256 / mu_xor8:    8.31x / 5.37x (2.44 ns)
+      AoS Binary Heap -> mu_four_heap / mu_timer_wheel:    2.25x / 15.42x (8.6 ns)
+      FNV-1a 64KB -> mu_hash_bytes_fast (mu_fast_codec):  74.85x (54.3 GB/s)
+
+
+================================================================================
+APPENDIX M (SEPARATED) — MULTITHREADING, LOCK-FREE, KERNEL SYNC & FIBERS
+================================================================================
+
+M.1 Why multithreading lives in a separate appendix
+
+    DON'T MAKE SHARED MEMORY SAFE.
+    WHEN POSSIBLE, DESIGN THE SYSTEM SO SHARING ISN'T REQUIRED.
+
+Multithreading multiplies an already cache-clean, SIMD-vectorized kernel across
+physical cores (`mu: mu_task_scheduler.h`, `mu_thread_system.h`). Never spawn
+more heavy compute workers than PHYSICAL cores: sibling HyperThreads share the
+same 48 KB L1d cache, store buffer, and AVX ports!
+
+M.2 Ownership, MESI Coherency & False Sharing (perf_test MT-1: 4.20x / 71.76x)
+
+    T0 -> disjoint slice A (64B-aligned) ; T1 -> disjoint slice B     (good)
+    T0 -> counter[0], T1 -> counter[1] on SAME 64B line -> MESI storm (bad)
+
+Every write requires Exclusive (`E`/`M`) ownership of the whole 64B cache line,
+invalidating every other core's L1/L2 (~40–100 cycles).
+- Pad per-worker atomics/cursors with `MU_ALIGN(64)` (`4.20x` faster; note Apple
+  Silicon M-series uses 128B cache lines!).
+- Better: accumulate in a local register and issue ONE relaxed atomic add at the
+  end of the slice (`71.76x` faster!).
+- Never put read-only `capacity`/`mask` on the same cache line as `_Atomic head`!
+- Advanced `perf c2c` Access-Map Triage & Offset-vs-Field Traps (`intel/linux-perf`):
+  Record via `perf c2c record -g -- app` and `perf c2c report --full-symbols
+  --stdio --double-cl > c2c.txt` (`--double-cl` groups 128B L2 spatial-streamer
+  pairs; prioritize top Pareto lines / `>5% Tot Hitm`).
+  * Inspect the byte **`Offset`** column first, NOT the C field name — WITH three
+    traps to watch:
+    (1) Small unpadded array `slots[tid].done` shows the **SAME C field name**
+        (`.done`) at **DIFFERENT cache-line offsets** (`0x00, 0x10, 0x20`) ->
+        classic **false sharing**!
+    (2) Two hot global counters packed in one 64B line show **DIFFERENT offsets**
+        (`0x00` vs `0x08`) hammered by all CPUs -> **BOTH true sharing (on each
+        counter) AND false sharing (between them)**!
+    (3) Under `--double-cl`, offsets `0x00..0x3f` vs `0x40..0x7f` lie on adjacent
+        64B lines coupled by the hardware pair-line prefetcher!
+- Shared Statistics Counter vs Lock in `perf annotate` (`per-cpu-stats`):
+  `lock cmpxchg`/`lock xchg` in a loop = spinlock; `lock add`/`lock inc`/`lock
+  xadd` with **flags/result ignored** (no branch after) = shared stats counter
+  (`memory_order_relaxed` STILL forces Exclusive `M` ownership at `100–300 ns`!).
+  Fix in priority order:
+  (A) Stack-local batching inside the loop + 1 relaxed flush at exit (`<= 2` sites),
+  (B) `sched_getcpu() & 63` 64B-padded multi-counter `struct stats[64]` (`1`
+      `sched_getcpu()` call + amortized padding across all counters; never call
+      `flush_stats()` on every request!),
+  (C) `__thread` TLS fallback for `.so` libraries that cannot own a global array.
+
+M.3 Read-Heavy Locks (`osq_lock` -> RWLock -> `seqlock` / RCU; MT-2: 27.44x!)
+
+- Read-Heavy Mutex Contention (`osq_lock` / `__mutex_lock_slowpath` / `__lll_lock_wait`):
+  When `>75%` of critical-section acquisitions are read-only, a `mutex` forces
+  `LOCK CMPXCHG` exclusive ownership on every reader, burning cycles in Linux's
+  Optimistic Spin Queue (`osq_lock`).
+- Step 1 (`rwlock`, `1.8–14.6x` at moderate cores): `pthread_rwlock_t` / kernel
+  `rwlock_t` (or sleepable `rw_semaphore`) lets readers overlap — **ALWAYS
+  re-check the condition (double-check) after dropping `rdlock` and acquiring
+  `wrlock`!** Beware write-heavy (`>50%`) or tiny critical sections, and watch
+  writer starvation (`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`).
+- Step 2 (Why `rwlock` STILL hits a ceiling -> `seqlock` & RCU):
+  `pthread_rwlock_rdlock` still executes `lock xadd` on `reader_count`, dirtying
+  the lock line into `M` state on EVERY read!
+  * Small POD (`<= 64B`): Linux `seqlock` (`mu: mu_sync.h`) uses an odd/even
+    `seq` counter so readers do **ZERO writes**, keeping the line Shared (`S`)
+    at L1 speed (`0.68 ns` vs `18.55 ns` = `27.44x` faster!).
+  * Large tables: swap an `_Atomic` pointer + retire old versions via epoch
+    reclamation (`mu: mu_deferred_free.h`), Hazard Pointers, or `liburcu`.
+
+M.4 Shadow-Cached + Batched SPSC Rings (`kfifo` / `io_uring` — MT-3: 127.12x!)
+
+1. Monotonic unmasked `uint32_t head, tail` (`buf[idx & (cap - 1)]`).
+2. Put `head` and `tail` on separate 64B cache lines; cache `head_shadow` on the
+   producer line and reload remote `head` ONLY when `tail - head_shadow == cap`
+   (Rigtorp / LMAX Disruptor / Aeron Single-Writer Principle; `mu: mu_spsc_queue.h`).
+3. Commit in batches of 32–64 items (`1.52 ns/msg` = 657.7M msgs/s vs `193.3 ns`
+   mutex!).
+
+M.5 SLUB / Mesa Per-Thread & `rseq` Per-CPU Slab Pools (MT-4: 932.84x!)
+
+Give each worker a private lockless `local_free` list (`0.20 ns/op` = 5.03B ops/s,
+0 atomics!) plus a per-slab `_Atomic` `remote_free` Treiber stack swept in bulk
+via 1 `atomic_exchange` when `local_free` empties (`mu: mu_slab.h`).
+Note Hoard (Berger ASPLOS'00) & Google TCMalloc: naive allocators cause allocator-
+induced false sharing (handing two threads chunks from the same cache line) and
+memory blowup across idle threads; TCMalloc solves both with Linux Restartable
+Sequences (`rseq`) PER-CPU caches (zero locks, zero atomics, bounded memory per
+physical core, plus a hugepage-aware page heap!).
+
+M.6 Lifetime & Parallel Compaction
+
+- Separate memory lifetime from logical existence (`inactive` slot reuse +
+  generational handles, never cross-thread delete-while-referenced).
+- Parallel stream compaction uses 2-pass prefix sum: local count -> exclusive
+  prefix sum -> disjoint contiguous write (zero atomic contention).
+
+M.7 Naughty Dog M:N User-Space Fiber Job System (perf_test MT-5: 1,301.95x!)
+
+OS thread block/wake (`futex`/`pipe`/`cond_wait`) costs ~11,167 ns (~23,450 cyc).
+Naughty Dog pins 1 worker thread per physical core and schedules ~160 preallocated
+64 KiB user-space fibers. Waiting on an unfinished child `atomic_counter` saves
+only 7 callee-saved x86-64 registers (`rsp, rbp, rbx, r12–r15`, 14 `mov`s =
+`8.58 ns` / `18 cycles`!) and switches immediately to the next ready job on the
+same core without touching the OS kernel!
+
+M.8 Scaling Laws (Amdahl, Gustafson, USL) & Heavy-Traffic Queueing Theory
+
+- Amdahl (`1 / ((1 - p) + p/N)`, fixed size) & Gustafson (`(1 - p) + p*N`, scaled
+  size) assume adding cores at worst flattens throughput; Hill & Marty (2008)
+  extend Amdahl to asymmetric P-core + E-core die-area budgets.
+- Gunther's Universal Scalability Law (`USL`):
+      C(N) = N / (1 + alpha*(N - 1) + beta*N*(N - 1))
+  * `alpha` = contention (serial queues/locks -> horizontal asymptotic ceiling)
+  * `beta`  = coherency (pairwise cache-line ping-pong `beta*N*(N-1)` -> causes
+    RETROGRADE scaling where adding threads makes total throughput DROP!)
+  * Peak concurrency sits at `N_max = floor(sqrt((1 - alpha) / beta))`!
+- Little's Law (`L = lambda * W`, zero distribution assumptions) & Kingman's
+  Heavy-Traffic Queueing Formula (the math behind the latency knee!):
+      E[W_q] ~= (rho / (1 - rho)) * ((c_a^2 + c_s^2) / 2) * E[S]
+  Wait explodes as utilization `rho -> 1` AND scales linearly with arrival +
+  service variance (`c_a^2`, `c_s^2`)! Crushing tail latency requires BOTH
+  headroom (`rho < 0.6..0.75`) AND eliminating service jitter (`c_s^2 -> 0`).
+
+M.9 Hardware C11 Atomics Cost Table, MCS Queue Locks & Work-First Deques
+
+- C11/C++11 Hardware Mapping (Sewell Cambridge table; verify with `herd7`/`litmus7`):
+    Operation            x86-64 (TSO)                ARMv8.0 / ARMv8.2-LSE
+    ------------------------------------------------------------------------
+    load(relaxed)        mov                         ldr
+    load(acquire)        mov (0 fence cost!)         ldar / ldapr
+    store(relaxed)       mov                         str
+    store(release)       mov (0 fence cost!)         stlr
+    store(seq_cst)       xchg (or mov + mfence!)     stlr (+ dmb ish on v8.0)
+    fetch_add(acq_rel)   lock xadd                   ldxr/stlxr loop -> ldaddal
+  x86-TSO only reorders Store -> Load (store buffer), so `acquire`/`release` are
+  free `mov`s (compiler barrier only), while `seq_cst` stores pay a full store-
+  buffer drain! ARMv8 is multicopy-atomic with weak ordering (`ldar`/`stlr`).
+- Bare TAS -> Try-First TTAS -> MCS Queue Locks & Drepper 3-State `futex`:
+  A bare `while (!cmpxchg)` TAS loop acquires the cache line **exclusively on
+  every failed spin** (`O(N^2)` bus traffic!). At minimum use **Try-First TTAS**
+  (`if (cas != ok) do { while (load == LOCKED) _mm_pause(); } while (cas != ok);`)
+  AND **pad the lock onto a separate 64B line from the protected payload** so
+  spinning waiters don't false-share the holder's data! At high core count, step
+  up to an **MCS queue lock** (Mellor-Crummey & Scott TOCS'91 — each waiter spins
+  on its OWN local `qnode.locked` line; unlock writes 1 line `next->locked = 0`)
+  or Drepper's 3-state `futex` (`0=unlocked, 1=locked-no-waiters, 2=contended`).
+- Cilk Work-First Principle (Frigo et al.'98) & Weak-Memory Chase-Lev (Lê'13):
+  Put synchronization cost on the rare THIEF steal path, never the owner's local
+  push/pop. On ARMv8, a proven Chase-Lev deque needs only `relaxed`/`release` on
+  owner push and 1 `seq_cst` fence only when popping the single last element!
+
+M.10 NUMA First-Touch Placement, SNC/NPS Node Modes & Controller Congestion
+
+- Allocation != Placement (`10-first-touch`):
+  `mmap` / `malloc` reserves virtual address space without choosing a NUMA node.
+  The thread that FIRST WRITES each page takes the minor page fault (`~669 ns`
+  per page vs `4 ns` warm!) and pins that physical frame to its local node!
+  RULE: Always zero/initialize large arrays inside `parallel_for` using the
+  exact same static thread-to-slice partitioning as your hot compute loop!
+- Verification & Topology Modes:
+  Check `numastat -p <pid>` (`numa_hit` vs `numa_miss`/`numa_foreign`) and query
+  per-page residency with `move_pages(2)`. Measure true loaded cross-node latency
+  with Intel `mlc`. Know the machine's BIOS node split: Intel Xeon Sub-NUMA
+  Clustering (`SNC2/SNC4` = 1 node per compute die) and AMD EPYC Nodes-Per-Socket
+  (`NPS1/NPS2/NPS4` across CCDs + I/O die xGMI links).
+- Memory-Controller Congestion > Remote Hop Latency (Dashti `Carrefour` ASPLOS'13):
+  Saturating one home node's DDR5 channels queues requests for hundreds of cycles
+  — interleaving heavy read-only weights across nodes can beat local congestion!
+  Disable `sysctl kernel.numa_balancing=0` on pinned real-time/HPC workers to
+  stop periodic page-fault hinting scans.
+
+M.11 OS Kernel Boundary, EEVDF, Isolation & `resctrl`/MPAM Cache Partitioning
+
+- Syscall Direct + Indirect Cost (`vdso(7)`, FlexSC OSDI'10, `11-syscall-cost`):
+  Even a 1-byte `pread` pays ~`280 ns+` fixed trap + Spectre/KPTI cost (`4 KiB`
+  costs only `1.12x` a 1B call — small syscalls never amortize!), PLUS indirect
+  L1i/L1d/TLB/BTB pollution (FlexSC). Ensure `clock_gettime` stays in `vDSO`;
+  batch storage/net I/O with `io_uring` (note `SQPOLL` needs its own core) or
+  user-space poll-mode `SPDK` / `DPDK` / `AF_XDP` (`NAPI` busy-poll).
+- Scheduler, `cgroup v2` & Core Isolation:
+  Linux `EEVDF` schedules by lag and virtual deadline (`sched_setattr` slice);
+  container `cgroup v2` `cpu.max` quota throttling causes multi-ms tail stalls
+  even at 30% average CPU! Isolate latency-critical cores via `isolcpus`,
+  `nohz_full`, `rcu_nocbs` and `/proc/irq/*/smp_affinity`.
+- Hardware LLC & Bandwidth Partitioning (`resctrl` — Intel RDT / AMD QoS / Arm
+  MPAM; Lo `Heracles` ISCA'15; Google `CPI2` EuroSys'13):
+  Pinning cores is NOT enough if batch jobs thrash shared L3 ways or saturate
+  DRAM bandwidth! Partition LLC ways (`L3:` bitmasks) and memory bandwidth (`MB:`)
+  via `/sys/fs/resctrl` so batch neighbours cannot hit your latency tail.
+
+M.12 Tail Latency at Scale, Killer Microseconds & Coordinated Omission
+
+- Fan-Out Tail Amplification & Killer Microseconds (Dean & Barroso CACM'13/'17):
+  If 1 leaf server has `p99 = 10 ms`, a root request fanning out to 100 leaves
+  sees that `p99` stall on `1 - 0.99^100 = 63%` of ALL user requests! And stalls
+  in the `1–100 us` band ("killer microseconds": NVMe, fabric, minor faults) are
+  too long for a 512-entry OoO ROB (~150 ns) to hide, yet too short for an OS
+  thread switch (~11 us) to hide — use user-space fibers (`M.7`) + polled queues!
+- Gil Tene's Coordinated Omission (`wrk2`, `HdrHistogram`, `12-coordinated-omission`):
+  A closed-loop benchmark waits for each reply before sending the next request.
+  When the server stalls for 200 ms, a closed-loop client withholds 1,000 due
+  requests and records ONE slow sample instead of 1,000 — underreporting `p99`
+  by **1,951x** (`100 us` vs `195 ms`!) on the exact same server timeline!
+  RULES:
+  1. Generate load open-loop on a fixed schedule (`due_time = t0 + i * period`)
+     and record `completion_time - due_time` (`wrk2` / `TailBench`).
+  2. Record full distributions in `O(1)` with `HdrHistogram` and ALWAYS report
+     `p50, p99, p99.9, MAX` (dropping `max` hides the worst stall!).
+- Virtual-Memory Stalls & OS Noise (Rigtorp; Linux `osnoise` / `rt-tests`):
+  `munmap()`, `free()` returning memory to OS, `madvise(MADV_DONTNEED)`, and page
+  reclaim fire synchronous cross-core **TLB shootdown IPIs** that freeze every
+  sibling thread in your address space for microseconds! Pre-fault & lock hot
+  memory (`mlockall(MCL_CURRENT|MCL_FUTURE)` / `MAP_POPULATE`), and attribute
+  residual NMI/IRQ/softirq/SMI steals with `trace-cmd` + Linux `osnoise` tracer.
+
+M.13 Core-Count Scaling Sweeps, Dual-Profile "Jumpers" & CV Thundering Herds
+
+1. Bisecting Core Sweep & Dual-Profile "Jumper" Triage (`intel/linux-perf` Flow D):
+   - Pre-check threading (`ldd bin | grep -E 'libpthread|libgomp|libtbb|libomp'`),
+     then sweep `1, 2, nproc/4, nproc/2, nproc` (throughput runs kept SEPARATE
+     from `perf record` runs!). Compute marginal `Scaling_Factor = (Score(N) -
+     Score(prev)) / (N - prev) / Score(1)` and flag the inflection point `< 0.80`.
+   - Compare top-15 `--no-children` functions at 1 core (`taskset -c 0 perf
+     record -F 99 -g -o perf_1.data -- cmd` — omit `-a` or pass `-C 0` so other
+     CPUs don't pollute the 1-core baseline!) vs N cores. If `>7` functions jump
+     due to low-core noise, compare **N/2 vs N cores** to isolate high-core walls!
+   - Flag **jumpers**: Rank rise `>= 3`, `%` ratio `>= 2x`, absolute gain `>= 3%`,
+     or new entrant `>= 2%`. Check inlining: thin atomic/lock wrapper (`<= 10`
+     lines) -> fix the **caller**; heavy logic -> fix the **inlinee**.
+2. Condition-Variable Thundering Herd vs Lock Contention (`cv-thundering-herd`):
+   - **Invisible to `perf lock stat`!** Distinguish via:
+     * Lock contention: `native_queued_spin_lock_slowpath` / `osq_lock`, HIGH
+       `lock_stat` wait_total, moderate context switches.
+     * CV thundering herd: `futex_wake`, `try_to_wake_up`, `wake_up_q`,
+       `__pthread_cond_broadcast`, NORMAL `lock_stat` wait, sky-high
+       `context-switches` & `perf trace -e futex` `FUTEX_WAKE val=INT_MAX`!
+       At 160 cores, `notify_all()` wastes `~N * 5 us = 800 us` per round as
+       `N-1` woken threads serialize on mutex re-acquisition and re-sleep!
+   - Four Topology-Matched Fixes:
+     (1) **Precise wakeup count**: wake `min(num_threads, num_jobs)` with early
+         break when `all_jobs_claimed()`,
+     (2) **`O(sqrt(N))` Tree wakeup**: leader wakes `K = sqrt(N)` helpers who
+         each wake `N/K` followers in parallel,
+     (3) **Post-unlock `notify_one()` + Baton hand-off**: unlock mutex BEFORE
+         `notify_one()` (never wake into a held lock!), and have each consumer
+         call `notify_one()` after unlock if `!queue.empty()`,
+     (4) **Counting Semaphore (`sem_post`/`sem_wait`)** or `std::barrier`/
+         `std::latch` for pure count/barrier predicates (zero mutex race!).
+
+Short version: design so sharing isn't required; check USL (`beta` coherency
+retrograde) and Kingman (`rho` + variance); find scaling walls via 1-vs-N/2-vs-N
+jumper tables + `perf c2c --double-cl`; keep cache lines Shared (`seqlock`/RCU/
+TTAS/MCS); kill CV `futex_wake` herds; first-touch pages on the worker that owns
+them; partition LLC/BW with `resctrl`; yield user-space fibers across killer
+microseconds; and measure tails open-loop from `due_time` with `HdrHistogram`
+(`p99.9` + `max`).
+
+================================================================================
+END
+================================================================================

@@ -1,0 +1,291 @@
+================================================================================
+ todostructures.txt — proposed additions to mylib
+================================================================================
+Guiding rules (from AGENT.md + .agents/skills/dod-performance/SKILL.md):
+  - Data-oriented: store the data you process, contiguously, in the order you
+    process it. SoA by default; AoS only when a whole record is always touched.
+  - Existence-based: "is this alive?" is a bit/branch on packed data, not a
+    pointer walk. Prefer IDs/handles over raw pointers.
+  - Fixed-capacity variants: every owned structure also ships a "static" form
+    that takes caller-provided memory (hot paths must not malloc).
+  - No hidden allocation in inner loops; allocation only at init/grow points and
+    routed through MU_MALLOC/MU_REALLOC/MU_FREE.
+  - Cache-line aware: block/chunk sizes that are powers of two and line-sized
+    so the compiler auto-vectorizes and the prefetcher can run.
+  - Branchless where cheap; skip-list / pointer-chasing structures are a smell.
+  - Every container gets the same shape: init/destroy, static variant, the two
+    hot operations, a count/capacity query, and a documented iteration form.
+
+Already present (do NOT duplicate):
+  arrays + min-containers, chunked u32 array, span, bulk storage (weak handles),
+  bitset, sparse set, id pool, multi index, length index, bitset, hash tables
+  (several), arena/pool/buddy/linear/ring/offset allocators, pcg32, ECS,
+  thread system + task scheduler, geometric algebra, noise, roguelike toolkit,
+  debug memory manager, perf timers.
+
+
+================================================================================
+ TIER 1 — the three you named, plus rationale
+================================================================================
+
+### 1. mu_bloom  —  probabilistic set membership
+    Why DOD: cheap early-out. "Can this chunk/asset/entity possibly exist?"
+    answered from a few cache lines, no pointer chase, no branch into deep code.
+    Perfect gate in front of a hash lookup or disk/asset access.
+    API:
+        mu_bloom_init(mu_bloom*, uint32_t bits);
+        mu_bloom_init_static(mu_bloom_static*, uint64_t* words, uint32_t bits);
+        void       mu_bloom_add(mu_bloom*, uint64_t key);
+        bool       mu_bloom_test(const mu_bloom*, uint64_t key);
+        void       mu_bloom_clear(mu_bloom*);
+        uint32_t   mu_bloom_bits(const mu_bloom*);
+        uint32_t   mu_bloom_hash_count(const mu_bloom*);   /* k */
+        /* block form: k probes collapsed into one 64-bit block index */
+    Storage: uint64_t words[]; k independent bit positions derived from two
+    hashes (double hashing: h_i = h1 + i*h2) so no k hash calls.
+    Perf: round bits (and word count) to 64/512 so the word scan vectorizes;
+    `test` reads k bits across <=1..2 cache lines if you choose the
+    "blocked Bloom" layout (one word per key, k bits inside it). Ship both:
+    classic + blocked. Document the false-positive formula so callers size it.
+
+### 2. mu_chunked_bitset  —  bitset that grows in fixed blocks
+    Why DOD: a plain bitset reallocates (and copies) as it grows; a chunked one
+    never moves existing words, so pointers/indices stay stable and growth is
+    O(new chunk) not O(n). Great for ever-growing entity/flag domains.
+    API:
+        mu_chunked_bitset_init(mu_chunked_bitset*, uint32_t chunk_bits); /* 512 default */
+        void   mu_chunked_bitset_set(mu_chunked_bitset*, uint32_t i);
+        void   mu_chunked_bitset_clear(mu_chunked_bitset*, uint32_t i);
+        bool   mu_chunked_bitset_get(const mu_chunked_bitset*, uint32_t i);
+        uint32_t mu_chunked_bitset_find_first_set(const mu_chunked_bitset*, uint32_t from);
+        uint32_t mu_chunked_bitset_popcount(const mu_chunked_bitset*);
+        /* whole-chunk ops for SIMD/word runs */
+        void   mu_chunked_bitset_or_chunk(...), and_chunk(...), clear_chunk(...);
+    Storage: uint64_t** chunks (or a chunk index + a slab), chunk_bits = 512
+    (one cache line) so per-chunk ops are line-local.
+    Perf: keep a per-chunk "non-empty" flag so find-first jumps empty chunks.
+
+### 3. mu_hier_bitset  —  hierarchical / multi-level bitset (2-level bitmap)
+    Why DOD: the standard trick from physics/ECS for huge ID domains. Level 0 is
+    the payload; level 1 marks which payload words are non-zero; level 2 marks
+    which level-1 words are non-zero; ... up to a root. A root test answers
+    "any bit set at all?" in O(1); find-first-set walks down O(levels) instead
+    of scanning. This is how you iterate a sparse 1M-entry set cheaply.
+    API:
+        mu_hier_bitset_init(mu_hier_bitset*, uint32_t bits);   /* levels derived */
+        void mu_hier_bitset_set(...), clear(...), bool test(...);
+        uint32_t mu_hier_bitset_find_first(const mu_hier_bitset*);
+        uint32_t mu_hier_bitset_find_next(const mu_hier_bitset*, uint32_t after);
+        uint32_t mu_hier_bitset_popcount(const mu_hier_bitset*);
+        bool mu_hier_bitset_any(const mu_hier_bitset*);   /* O(1) root test */
+    Storage: one contiguous array, levels packed back to back, level base
+    offsets cached; all levels are uint64_t words.
+    Perf: set/clear update the summary chain in O(levels) with no branches;
+    find-next is the hot path for systems that iterate sparse sets.
+    Note: this subsumes section-2's find-fast if you also want growth, so
+    consider hier-over-chunked later if needed.
+
+
+================================================================================
+ TIER 2 — high-value DOD staples (strongly recommended)
+================================================================================
+
+### 4. mu_intern  —  string interning -> u32 ids
+    Why DOD: turns every name/string comparison and hash into an integer
+    compare, and lets you store ids in SoA tables instead of pointers. This is
+    the single biggest "IDs over pointers" win and pairs with the interning
+    advice in AGENT.md.
+    API:
+        mu_intern_init(mu_intern*, uint32_t arena_bytes);
+        uint32_t mu_intern_get(mu_intern*, const char* s);      /* -> stable id */
+        const char* mu_intern_str(const mu_intern*, uint32_t id);
+        uint32_t mu_intern_count(const mu_intern*);
+    Storage: one byte arena + offset table + a hash (mu_hash64) from
+    hash-of-bytes -> id. Ids are dense u32; strings are NUL-free (len+bytes).
+    Perf: FNV/xxhash for the key; ids sorted for stable ordering; no per-string
+    malloc.
+
+### 5. mu_spatial_hash  —  uniform-grid broadphase / CSR buckets
+    Why DOD: the canonical example of "compute counts, prefix-sum, then pack".
+    Two-pass build (count per cell, then scatter) into a flat CSR with NO
+    per-cell allocation and perfect cache behavior on query.
+    API:
+        mu_grid_init(mu_grid*, float cell, bounds, capacity);
+        void   mu_grid_build(mu_grid*, const float* xs, const float* ys, uint32_t n);
+        uint32_t mu_grid_query_cell(...);  /* begin/end into packed indices */
+        mu_grid_query_radius(...);
+    Storage: cell_count[] + cell_offsets[] (prefix sum) + packed u32 indices.
+    Perf: SoA input arrays; the pair-test loop walks packed indices linearly.
+
+### 6. mu_csr  —  compressed sparse row (static graph / adjacency)
+    Why DOD: rows are contiguous, adjacency is packed, zero pointer chasing.
+    Use for navmesh adjacency, contact graphs, dependency graphs, mesh edges.
+    API:
+        mu_csr_build_from_edges(mu_csr*, uint32_t node_count, const uint32_t* a,
+                                const uint32_t* b, uint32_t edge_count, bool symmetric);
+        mu_csr_row_begin/end(const mu_csr*, uint32_t node);
+        /* also store a parallel weights[] if needed */
+    Storage: row_offsets[n+1] + col_indices[m] (+ optional weights[m]).
+    Perf: bulk build with counting sort; iterate rows with a span.
+
+### 7. mu_sorted_map  —  flat sorted (key,value) + binary search
+    Why DOD: for read-mostly static tables (glyph atlas, keybinds, config,
+    name->id). One contiguous array, binary search = log n cache-friendly
+    probes, bulk build = one sort, no buckets, no hash.
+    API:
+        mu_sorted_map_init/from_unsorted(mu_sorted_map*, elem_size);
+        const void* mu_sorted_map_find(const mu_sorted_map*, uint64_t key);
+        /* static variant over caller arrays */
+    Storage: SoA or AoS depending on access; keys[] separate so the search only
+    touches keys (hot), values cold.
+
+### 8. mu_indexed_heap  —  binary heap with decrease-key
+    Why DOD: the A* open set and the scheduler both need "find handle, lower
+    its key". Plain heaps can't; an indexed heap keeps heap[pos] -> handle and
+    handle -> pos, both flat u32 arrays. Replaces the ad-hoc heap in
+    mu_roguelike.h and generalizes it.
+    API:
+        mu_indexed_heap_init(mu_indexed_heap*, uint32_t cap);
+        void  mu_indexed_heap_push(heap, uint32_t handle, uint32_t priority);
+        bool  mu_indexed_heap_decrease(heap, uint32_t handle, uint32_t priority);
+        uint32_t mu_indexed_heap_pop(heap);   /* -> handle */
+    Storage: uint32_t heap_handle[], heap_key[], handle_pos[]; optional
+    tie-break by insertion counter for determinism.
+
+### 9. mu_sort  —  radix + small sorts for indices/keys
+    Why DOD: the performance skill's sorting chapter. Sorting u32 keys/indices
+    by radix beats comparison sort and is branch-free; insertion sort for n<32.
+    API:
+        mu_radix_sort_u32(uint32_t* keys, uint32_t* payload, uint32_t n);
+        mu_radix_sort_u64(...);
+        mu_sort_indices_u32(const uint32_t* keys, uint32_t* out_idx, uint32_t n);
+        mu_insertion_sort_*  (n <= 32)
+        /* stable count-sort into a scratch buffer */
+    Storage: caller-provided scratch (2x buffers for ping-pong).
+    Perf: 4 passes of 8 bits, counting sort per pass; document when radix
+    loses to comparison (small n, already-nearly-sorted).
+
+### 10. mu_union_find  —  disjoint set
+    Why DOD: flat u32 parent[] with path compression + union by size. Used for
+    navmesh region building, connectivity, clustering. Trivial but ubiquitous.
+    API:
+        mu_uf_init(mu_uf*, uint32_t n);
+        uint32_t mu_uf_find(mu_uf*, uint32_t x);
+        bool     mu_uf_union(mu_uf*, uint32_t a, uint32_t b);
+        uint32_t mu_uf_component_count(const mu_uf*);
+    Storage: parent[] + size[]; run count for component tracking.
+
+### 11. mu_spsc_queue  —  lock-free single-producer/single-consumer ring
+    Why DOD: the thread/task system exists but there is no cheap handoff
+    primitive. A bounded SPSC ring is the workhorse for producer->renderer,
+    IO->sim, and job-result pipes. Then add MPMC (Vyukov) if needed.
+    API:
+        mu_spsc_init(mu_spsc*, void* buffer, uint32_t capacity_bytes, uint32_t elem_size);
+        bool mu_spsc_push(mu_spsc*, const void* elem);
+        bool mu_spsc_pop(mu_spsc*, void* out);
+        bool mu_spsc_empty(const mu_spsc*);
+    Storage: cache-line aligned head/tail (separate lines), payload ring.
+    Perf: acquire/release atomics only; no locks, no allocation; power-of-two
+    capacity for mask-based wrap.
+
+### 12. mu_simd  —  portable SIMD wrappers
+    Why DOD: the performance skill's SIMD chapter needs a home. A thin,
+    portable header (SSE/AVX/NEON via macros) for the 20 ops you use 95% of the
+    time: load/store, add/sub/mul, min/max, fma, dot4, cross3, lerp, sqrt.
+    API:
+        mu_f32x4, mu_f32x8 (typedef'd to the native type)
+        mu_f32x4_add/sub/mul/... , mu_f32x4_load/store, mu_f32x4_lerp
+        scalar fallbacks when no SIMD is available.
+    Perf: keep the surface tiny and let callers batch; document alignment
+    requirements and the AoS->SoA staging pattern.
+
+### 13. mu_bitserial  —  bit-level serialization + varints
+    Why DOD: network/replay/demo snapshots. Store exactly N bits per field
+    instead of a struct; delta-encode against a baseline. Pairs with bitpacking.
+    API:
+        mu_bitwriter_init(mu_bitwriter*, void* buffer, uint32_t capacity_bytes);
+        void mu_bw_write_bits(bw, uint32_t value, uint32_t bits);
+        void mu_bw_write_varint(bw, uint64_t value);
+        void mu_bw_write_float_range(bw, float v, float lo, float hi, uint32_t bits);
+        mu_bitreader_*  mirror API.
+        void mu_bitserial_delta_u32(...);   /* baseline-relative */
+    Storage: caller buffer; writer/reader are just {ptr, bitpos}.
+    Perf: write into a u64 accumulator, flush by bytes; branch-light.
+
+
+================================================================================
+ TIER 3 — worth having, lower urgency
+================================================================================
+
+### 14. mu_frame_allocator  —  per-frame linear arena with reset
+    Double-buffered (or ring) arena that is reset each frame; sub-allocations
+    are bump pointers. No free(). Prevents per-frame malloc churn.
+    API: mu_frame_alloc(&fa, size, align); mu_frame_reset(&fa); two buffers
+    swapped on frame boundary.
+
+### 15. mu_stats  —  running stats + HDR-style histogram (profiling)
+    Why DOD: the profiling section of the skill. min/max/mean/variance Welford,
+    plus a fixed-bucket log histogram for percentiles without storing samples.
+    API: mu_stats_push(&s, x); mu_stats_percentile(&s, p); mu_stats_reset.
+
+### 16. mu_sync  —  spinlock / rwlock / atomics wrappers
+    One header over the platform atomics used by the thread system, plus a
+    cache-line-padded spinlock and a seqlock. Consolidates the add-hoc
+    mu_ts_atomic* types.
+
+### 17. mu_toposort  —  dependency ordering
+    Pairs with mu_csr + the task scheduler: produce a valid execution order (or
+    detect cycles) from edges. Flat arrays, Kahn's algorithm.
+
+### 18. mu_small_vec  —  inline small-buffer vector
+    Fixed inline capacity + heap overflow. For the common "usually < 8 elements"
+    case without an allocation. Ship a static-only variant too (never grows).
+
+
+================================================================================
+ CROSS-CUTTING / ARCHITECTURAL SUGGESTIONS
+================================================================================
+
+A. Allocator-aware containers (biggest structural win).
+   Today every owned container hard-calls MU_MALLOC/MU_REALLOC/MU_FREE through
+   the macro override. That is fine for a global redirect, but it cannot put
+   ONE container in an arena. Consider an explicit, DOD-friendly escape hatch:
+       typedef struct mu_allocator { /* function ptrs + ctx */ } mu_allocator;
+       mu_array_init_alloc(mu_array*, mu_allocator*);
+   Keep the macro path as the default so nothing breaks. This lets hot systems
+   own their memory while the rest keeps using the global macros.
+   NOTE: this is a design decision, not a quick edit — flagging it, not applying.
+
+B. Give every new container the SAME canonical surface so it is learnable:
+       mu_<thing>_init / _init_static / _destroy / _clear
+       mu_<thing>_count / _capacity
+       two hot ops
+       a documented iteration pattern (span or begin/next)
+   and a one-line "when to use / when NOT to use" comment at the top.
+
+C. Prefer spanned iteration: return `mu_span`/CSR ranges from queries rather
+   than callbacks or linked lists (matches the "existence-based processing" rule).
+
+D. For each owned structure, add a `MU_<THING>_IMPLEMENTATION`-style or
+   header-only choice consistent with the rest of the library, so a user can
+   keep it header-only or compile it into a .c — pick ONE policy and state it
+   in mylib/README.md (today it is mostly header-only, except mu/mu_*.c).
+
+
+================================================================================
+ RECOMMENDED BUILD ORDER
+================================================================================
+ 1. Fix the naming foundation first (todorenaming.txt): guards, duplicate hash,
+    array/allocator consolidation. New structures should be built on the
+    cleaned-up names.
+ 2. mu_hier_bitset  (highest payoff, used everywhere)
+ 3. mu_intern       (unlocks IDs-over-pointers across the whole lib)
+ 4. mu_bloom + mu_chunked_bitset
+ 5. mu_spatial_hash + mu_csr
+ 6. mu_indexed_heap (retire the roguelike-local heap)
+ 7. mu_sort + mu_simd + mu_spsc_queue
+ 8. mu_sorted_map, mu_union_find, mu_bitserial, then Tier 3 as needed.
+
+Each addition ships with: a static variant, tests appended to mylib/test.c
+(CHECK macro) and mylib/test.cpp, and a docs/<name>.md section.
+================================================================================

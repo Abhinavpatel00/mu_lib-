@@ -1,0 +1,277 @@
+================================================================================
+ todorenaming.txt — mylib consistency / naming TODO
+================================================================================
+Status: the big macro unification is DONE (single mu_macros.h, all headers
+include it, MU_* macros, allocation routed through MU_*). What is LEFT is the
+rename/cleanup pass that was intentionally deferred to you.
+
+Everything below is a checklist. Each item has: what/where, target, and a
+one-line rationale. Nothing here is applied yet.
+
+Current baseline (verified green):
+  - C  : cc -std=c99 -O2 -Wall -Wextra -I. test.c mu/*.c  -> "All checks passed."
+  - C++: c++ -std=c++17 -O2 -fpermissive -I. test.cpp mu/*.c -> 231/231 checks
+
+--------------------------------------------------------------------------------
+ TARGET CONVENTIONS (the north star)
+--------------------------------------------------------------------------------
+  Types      : mu_snake_case, NO trailing _t.        e.g. mu_length_index
+  Functions  : mu_snake_case, verb last.             e.g. mu_hash32_get
+  Macros     : MU_SCREAMING_SNAKE, module-scoped.    e.g. MU_ECS_ENTITY_INDEX_BITS
+  Fields     : snake_case (never camelCase).
+  Constants  : SCREAMING_SNAKE (enums too).
+  Inline     : MU_INLINE (it already expands to `static inline`).
+  Guard      : #pragma once, nothing else.
+  Allocation : MU_MALLOC / MU_CALLOC / MU_REALLOC / MU_FREE / MU_MEMSET /
+               MU_MEMCPY / MU_MEMMOVE / MU_MEMCMP (already done in most files).
+  Assertions : MU_ASSERT.
+  One macro layer only: mu_macros.h. No per-module copies, ever.
+
+
+================================================================================
+ A. HEADER GUARDS  -> unify to `#pragma once`
+================================================================================
+Mixed today: some files use `#pragma once`, others use `#ifndef X_H` guards.
+Pick `#pragma once` everywhere (the user already chose this).
+
+Convert to #pragma once (remove the `#ifndef X_H / #define X_H` pair AND the
+matching trailing `#endif`):
+  [ ] allocators.h                (MU_ALLOCATORS_H)
+  [ ] mu_ecs.h                    (MU_ECS_H)
+  [ ] mu_geometric_algebra.h      (MU_GEOMETRIC_ALGEBRA_H)
+  [ ] mu_min_containers.h         (MU_MIN_CONTAINERS_H)
+  [ ] mu_mmgr.h                   (MU_MMGR_H, guard starts at line 19)
+  [ ] mu/mu_length_index.h        (MU_LENGTH_INDEX_H)
+  [ ] mu_noise_math.h             (MU_NOISE_MATH_H)
+  [ ] mu_roguelike.h              (MU_ROGUELIKE_H)
+  [ ] mu_task_scheduler.h         (MU_TASK_SCHEDULER_H)
+  [ ] mu_thread_system.h          (MU_THREAD_SYSTEM_H)
+
+Redundant belt-and-braces (already #pragma once, drop the extra #ifndef):
+  [ ] mu.h                        (has #pragma once + #ifndef MU_H)
+  [ ] mu/mu_common.h              (has #pragma once + #ifndef MU_COMMON_H)
+  [ ] mu_macros.h                 (has #pragma once + #ifndef MU_MACROS_H)
+
+Already only #pragma once (leave alone): offset_allocator.h,
+  mu/mu_allocators.h, mu/mu_array.h, mu/mu_bitpacking.h, mu/mu_bitset.h,
+  mu/mu_bulk_storage.h, mu/mu_chunked_array.h, mu/mu_span.h, mu/mu_sparse_set.h,
+  mu/mu_string.h.
+
+No guard at all (add #pragma once):
+  [ ] mu/mu_hash_table.h          (starts with blank line + comment)
+  [ ] mu/mu_id_pool.h
+  [ ] mu/mu_multi_index.h
+  [ ] mu/mu_pcg.h
+  [ ] mu/mu_perf.h
+  [ ] mu/mu_rand.h                (has `#pragma  once` with a double space)
+
+Cosmetic: several files have `#pragma  once` (two spaces). Normalize to
+`#pragma once`:
+  [ ] mu/mu_perf.h, mu/mu_rand.h, mu/mu_hash_table.h, others
+
+
+================================================================================
+ B. INLINE / LINKAGE LEFTOVERS
+================================================================================
+  [ ] offset_allocator.h:101  `static inline void oa_debug_validate(...)`
+        -> MU_INLINE   (only remaining raw `static inline` in the tree).
+
+Leftover per-module macro names that survived the migration (they are stale
+copies of the now-unified macros):
+  [ ] mu_ecs.h      uses MU_ECS_FREE      (1 site)  -> MU_FREE
+  [ ] mu_min_containers.h uses MUC_MALLOC (1 site)  -> MU_MALLOC
+  [ ] mu_thread_system.h has `#define MU_TS_INLINE` leftover -> delete; use MU_INLINE
+        (check for other MU_TS_* helper aliases that shadow MU_*)
+
+These are NOT stale — they are legitimate module-scoped constants/options and
+should KEEP their MU_<MODULE>_ names:
+  MU_ECS_ENTITY_INDEX_BITS, MU_ECS_ENTITY_GENERATION_BITS,
+  MU_ECS_INLINE_MASK_WORDS, MU_ECS_INSTANCE_INVALID,
+  MU_SCHED_PRIORITY_LOW/NORMAL/HIGH/COUNT, MU_SCHED_INIT_DESC_DEFAULT,
+  MU_TS_INIT_DESC_DEFAULT, MU_TS_EXIT_DESC_DEFAULT,
+  MU_ROG_HAS_CGLM, MU_ROG_CGLM_HEADER, MU_GA_CGLM_HEADER,
+  MU_NOISE_DIST_MANHATTAN/EUCLIDEAN/CHEBYSHEV, MU_NOISE_MATH_H.
+
+
+================================================================================
+ C. TYPE NAMES  (outliers from the mu_snake_case convention)
+================================================================================
+The rest of the library is already `mu_snake_case` (mu_bitset, mu_span,
+mu_bulk_storage, mu_rog_ivec2, mu_sched_counter, mu_ts_system, ...). These are
+the exceptions:
+
+  current                       ->  target
+  ----------------------------      ------------------------------------------
+  hash_t                        ->  mu_hash        (or remove; see section D)
+  MU_HASH_EMPTY (in hash_t)     ->  (collides with the other table; see D)
+  mu_hash32_static_t            ->  mu_hash32_static
+  mu_hash32_t                   ->  mu_hash32
+      (mu_hash_table.h; the "_t" suffix is used nowhere else)
+  gaussian_state_t              ->  mu_gaussian_state   (mu/mu_rand.h)
+  array_header_t                ->  mu_array_header     (mu/mu_array.h)
+  ByteSpan                      ->  mu_byte_span        (mu/mu_span.h)
+  BYTE_SPAN(...)                ->  MU_BYTE_SPAN(...)
+  MuLengthBlock                 ->  mu_length_block     (mu/mu_length_index.h)
+  MuLengthTotals                ->  mu_length_totals
+  MuLengthPosition              ->  mu_length_position
+  MuLengthIndex                 ->  mu_length_index
+  OA_Allocator                  ->  mu_oa_allocator     (offset_allocator.h + .c)
+  OA_Node, OA_Allocation        ->  mu_oa_node, mu_oa_allocation
+  OA_StorageReport[Full]        ->  mu_oa_storage_report[_full]
+  OA_NodeIndex, oa_uint8/16/32  ->  mu_oa_node_index, mu_oa_u8/u16/u32
+  oa_*() functions              ->  mu_oa_*()           (oa_init -> mu_oa_init, ...)
+  sAllocUnit                    ->  mu_mmgr_alloc_unit  (mu_mmgr.h; struct tag_au)
+  sMStats                       ->  mu_mmgr_stats
+  MemoryStatistics              ->  mu_mmgr_stats (alias) or drop the alias
+  m_alloc_* enum                ->  MU_MMGR_ALLOC_*     (or keep if you want the
+                                     fluidstudios-compatible surface)
+  mmgr*() camelCase functions   ->  either keep the legacy API verbatim or
+                                     rename to mu_mmgr_* (55 call sites)
+
+Note on mu_hash32 vs mu_hash64: today "hash32" stores a uint64 key and a
+uint32 value, while "hash64" stores uint64 key and uint64 value. The number
+tracks the VALUE width, not the key. If you rename, either keep that meaning
+(mu_hash32 = u32 values) or rename by intent (mu_hash_u32_value /
+mu_hash_u64_value) so the suffix isn't misleading.
+
+Fields that are camelCase and should be snake_case:
+  [ ] gaussian_state_t { int hasSpare; double spare; }  -> has_spare
+  [ ] mu_rand.h uses rand()/M_PI directly; the rest of the lib uses mu_pcg32.
+
+
+================================================================================
+ D. DUPLICATE / COMPETING IMPLEMENTATIONS  (the real inconsistencies)
+================================================================================
+These are behaviour-level, not just names. Decide one winner per row.
+
+D1. Five (5) u64 hash tables exist under three naming schemes:
+    - mu_hash_table.h: `hash_t` family (hash_init/free/find_slot/put/get),
+      sentinel HASH_EMPTY = 0, NO asserts, u64->u64.
+    - mu_hash_table.h: `mu_hash32_static_t` (caller-owned arrays, u64 key,
+      u32 value, sentinel MU_HASH_UNUSED = all-ones).
+    - mu_hash_table.h: `mu_hash32_t` (heap-owned, u64 key, u32 value,
+      currently only MU_ASSERTs and NO resizing).
+    - mu_min_containers.h: `mu_hash64` (heap-owned, u64->u64, tombstones,
+      rehash, pow2 capacity) — the most complete one.
+    - mu_min_containers.h: `mu_hash64_static` (fixed, caller-owned).
+    -> Recommend: keep ONE owned u64->u64 table (`mu_hash64`), one fixed
+       caller-owned table, and ONE u32-value variant. Delete the `hash_t`
+       family and `mu_hash32_static_t`/`mu_hash32_t` duplication.
+
+D2. mu_hash64_mix() is DEFINED TWICE with identical bodies:
+      mu/mu_hash_table.h:324  and  mu_min_containers.h:150
+    Any translation unit that includes both headers gets a redefinition error
+    (MU_INLINE = static inline is exempt only within one TU, but a duplicate
+    definition in the SAME TU is an error; these are different functions with
+    the same name -> hard error). Move the mix function to ONE place
+    (suggest mu_common.h or a new mu_hash.h) and include it.
+    Also MU_HASH_UNUSED is #defined twice (mu_hash_table.h and
+    mu_min_containers.h) — fold into one.
+    Note: today mu.h includes mu/mu_hash_table.h but NOT mu_min_containers.h,
+    so the collision is currently latent — but it will bite as soon as both
+    are pulled into the same TU.
+
+D3. TWO dynamic-array implementations with different macro prefixes:
+      mu/mu_array.h          : array_header_t, array_push/size/reserve/free/pop/back
+      mu_min_containers.h    : mu_array_header, mu_array_push/size/reserve/free/...
+    -> Pick one (recommend the mu_array_* names in mu_min_containers.h, which
+       are already prefixed and match the convention) and delete the other, or
+       keep one as the base and make the other a thin alias layer.
+    -> ALSO: mu/mu_length_index.h calls array_reserve/array_push/array_header,
+       i.e. the UNPREFIXED set, so whichever you keep, update this call site.
+
+D4. TWO allocator headers:
+      allocators.h        : mu_arena, mu_pool, mu_buddy
+      mu/mu_allocators.h  : mu_buffer, mu_linear_allocator, mu_ring_allocator
+    plus offset_allocator.h (OA_*) and mu_mmgr.h (debug allocator).
+    -> Not necessarily wrong, but document the split clearly: put them all
+       under mu/ and give each a one-line "when to use" comment, or merge the
+       overlapping arena/linear concepts.
+
+D5. TWO RNGs:
+      mu/mu_pcg.h  : mu_pcg32 (in the umbrella)
+      mu/mu_rand.h : rand()-based Box-Muller gaussian (NOT in the umbrella)
+    -> Either make mu_rand.h build on mu_pcg32 and drop rand(), or move it out
+       of mylib. Document the decision.
+
+
+================================================================================
+ E. OTHER BUGS / NITS FOUND WHILE SURVEYING
+================================================================================
+  [ ] mu_mmgr.h:45  `#ifndef MU_MU_ASSERT_ON_LEAK` — typo for
+      MU_MMGR_ASSERT_ON_LEAK. The typo'd name means the option can never be
+      overridden by the documented spelling. Fix the spelling.
+  [ ] mu_mmgr.h:29  `#define __FUNCTION__ __func__` — this defines a reserved
+      identifier globally for every includer. Scope it to the mmgr TU only
+      (it is inside MU_MMGR_IMPLEMENTATION, verify) or drop it (C99 has
+      __func__).
+  [ ] mu_mmgr.h uses `__FUNCTION__` inside MU_MMGR_MALLOC/etc.; prefer __func__
+      for standard C.
+  [ ] mu_hash_table.h `hash_t` deliberately omits asserts while `mu_hash32_t`
+      asserts — inconsistent contract for the same job.
+  [ ] m_alwaysValidateAll / m_alwaysLogAll / m_alwaysWipeAll / m_randomeWipe
+      ("randome" misspelling inherited from mmgr) -> consider MU_MMGR_* names.
+  [ ] mu_ts_atomic32_t / mu_ts_atomic64_t / mu_ts_atomicptr_t use a mu_ts_
+      prefix while everything else uses mu_; consider mu_atomic32 etc. if these
+      are meant to be general concurrency primitives.
+  [ ] `#pragma  once` double-space cosmetic fix (section A).
+
+
+================================================================================
+ F. SOURCE (.c) FILES
+================================================================================
+  [ ] After renaming types in headers, update every .c that references them:
+      mu/mu_bitset.c, mu/mu_bulk_storage.c, mu/mu_chunked_array.c,
+      mu/mu_id_pool.c, mu/mu_multi_index.c, mu/mu_sparse_set.c,
+      offset_allocator.c (OA_* rename lands here).
+  [ ] mu/mu_multi_index.c:2 includes "mu_hash_table.h" — if you delete/rename
+      the `hash_t` family, fix this include (it likely does not even use it).
+  [ ] Normalize section-divider comment style across .c files (some use
+      `/* ---- */`, some use ASCII art banners).
+
+
+================================================================================
+ G. TESTS + DOCS + DELIVERABLES TO UPDATE AFTER RENAMES
+================================================================================
+  [ ] mylib/test.c :191 uses MuLengthIndex; update to the new name.
+  [ ] mylib/test.cpp : check for any renamed types/macros (231 checks).
+  [ ] mylib/docs/*.md reference the old names and now-removed per-module macros:
+        - sets-and-ids.md : hash_t, mu_hash32_t, mu_hash64 (lines ~296-365)
+        - containers.md   : array_header_t, mu_hash64/mu_hash64_static (~16-296)
+        - allocators.md   : oa_init (line ~113)
+        - README.md       : mu_hash32 / mu_hash64 table (line ~32)
+        - core.md         : should document mu_macros.h and the MU_* layer
+        - ecs.md, concurrency.md, roguelike.md : per-module macro names
+          (MU_ECS_MALLOC, MU_SCHED_INLINE, ...) that no longer exist
+  [ ] mylib/README.md line ~20 : mu_hash32 / mu_hash64
+  [ ] AGENT.md : ~1394, ~1440 (mu_hash32_t, mu_hash32 / mu_hash64 table);
+      plus any MU_TS_*/MUC_*/MMGR_* macro references.
+  [ ] dodnotes.txt : ~1717 (mu_hash32 / mu_hash64), and §15 mu recipes.
+  [ ] .agents/skills/dod-performance/references/mu-map.md : hash_t (line ~169),
+      mu_hash32_t (line ~173), and per-module macro names.
+  [ ] .agents/skills/dod-performance/SKILL.md, game-engine-dod/* : scan for the
+      same stale mu names.
+
+Grep to re-run after the rename to prove nothing is stale:
+    grep -rnE "\bhash_t\b|MuLength|ByteSpan|BYTE_SPAN|array_header_t|\
+OA_|oa_init|sAllocUnit|sMStats|MemoryStatistics|MU_TS_(INLINE|MALLOC)|\
+MU_SCHED_INLINE|MUC_MALLOC|MU_ECS_FREE|MU_MU_ASSERT_ON_LEAK" \
+    mylib/ AGENT.md dodnotes.txt .agents/
+
+
+================================================================================
+ H. SUGGESTED ORDER OF OPERATIONS (so the tree never stays broken)
+================================================================================
+  1. Header guards + `static inline` + leftover macros (sections A, B). Small,
+     mechanical, compiler-verifiable.
+  2. Fix real bugs first: D2 duplicate mu_hash64_mix, E MU_MU_ASSERT_ON_LEAK.
+  3. Collapse the duplicate containers (D1, D3) — biggest win, do it per module
+     and re-run the C + C++ tests after each.
+  4. Type renames (section C) — do file-by-file, rebuild after each.
+  5. mmgr / offset_allocator renames (C, E) — self-contained modules.
+  6. Docs + deliverables (section G).
+  After every step:
+     cc -std=c99 -O2 -Wall -Wextra -I. test.c mu/*.c -o /tmp/mu_test && /tmp/mu_test
+     c++ -std=c++17 -O2 -fpermissive -I. test.cpp mu/*.c -o /tmp/mu_cpp && /tmp/mu_cpp
+     for h in *.h mu/*.h; do cc -std=c99 -fsyntax-only -I. "$h" || echo "FAIL $h"; done
+================================================================================

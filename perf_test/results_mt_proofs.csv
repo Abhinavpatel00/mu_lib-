@@ -1,0 +1,13 @@
+suite,case,variant,ns_per_op,cyc_per_op,speedup,checksum
+multithreading,false_sharing,"Same 64B Line _Atomic (MESI Ping-Pong)",9.7187,20.409,1.000,4194304
+multithreading,false_sharing,"64B Cache-Line Padded _Atomic",2.3132,4.857,4.201,4194304
+multithreading,false_sharing,"Local Register Accum + 1 Final Atomic",0.1354,0.284,71.764,4194304
+multithreading,seqlock_vs_rwlock,"pthread_rwlock_t (Dirties Lock Line!)",18.5463,38.947,1.000,6291456
+multithreading,seqlock_vs_rwlock,"Linux Seqlock (Pure Acquire Read, 0 RMW)",0.6760,1.419,27.437,6291456
+multithreading,spsc_queue,"pthread_mutex_t Ring Buffer",193.2660,405.858,1.000,549756338176
+multithreading,spsc_queue,"Lock-Free SPSC (Reloads Shared Idx)",6.4721,13.591,29.861,549756338176
+multithreading,spsc_queue,"Batched+Shadow SPSC (io_uring/kfifo x64)",1.5204,3.192,127.119,549756338176
+multithreading,per_thread_slab,"Shared Mutex Freelist Pool",185.4141,389.369,1.000,1099510579200
+multithreading,per_thread_slab,"SLUB / Mesa Per-Thread Child Freelist",0.1988,0.417,932.840,1099510579200
+multithreading,fiber_vs_os_switch,"OS Kernel Thread Block/Wake (2 switches)",11167.1891,23450.954,1.000,16384
+multithreading,fiber_vs_os_switch,"Naughty Dog 64KB User-Space Fiber Switch",8.5773,18.012,1301.948,4194304
