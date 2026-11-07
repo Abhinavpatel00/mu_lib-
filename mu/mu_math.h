@@ -1962,6 +1962,13 @@ MU_INLINE void mu_quat_rotate_vec3_soa(mu_quat q,
     MU_ASSERT(xin != NULL && yin != NULL && zin != NULL);
     MU_ASSERT(xout != NULL && yout != NULL && zout != NULL);
 
+#if !defined(MU_MATH_AVX512) && !defined(MU_MATH_AVX2)
+    /* The scalar tail below calls mu_quat_rotate_vec3, so the widened copies are
+     * only read by the SIMD paths. Silencing them keeps -Wextra -Werror clean on
+     * a target without either path (and is honest: they really are unused). */
+    (void)w2; (void)u2x; (void)u2y; (void)u2z;
+#endif
+
 #if defined(MU_MATH_AVX512)
     {
         const __m512 vux = _mm512_set1_ps(ux),  vuy = _mm512_set1_ps(uy),  vuz = _mm512_set1_ps(uz);
