@@ -451,6 +451,61 @@ static inline void     *ptr_get(uintptr_t v)            { return (void *)(v & ~P
 static inline unsigned  ptr_tag(uintptr_t v)            { return (unsigned)(v & PTR_TAG_MASK); }
 ```
 
+### 3.15 Data Structures Are Intrusive by Default
+
+*(Evidence: `perf_test/bench_intrusive.c`, `perf_test/PERF_DS.md`; implementations: `mu/mu_dlist.h`, `mu/mu_skiplist.h`, `mu/mu_rb_tree.h`)*
+
+**The rule.** If an object has to be a member of a container, put the link **inside the object**. The container stores no nodes, owns no payload, and allocates nothing. Before writing a container that allocates one node per element, justify why the object cannot carry the link.
+
+This is not a style preference. It changes three measurable things, and they are measured separately so nobody has to take them on faith:
+
+| what it buys | measured (1M elements, 6 independent runs, median of paired ratios, `taskset -c 0`) |
+| --- | --- |
+| **Zero allocations** | 1 048 576 `malloc`/`free` pairs -> **0** |
+| **One indirection, not two** | traverse **1.3x** vs heap nodes (up to 2.1x), **1.4x** vs pooled nodes (up to 1.8x) |
+| **O(1) removal from the object** | erase by handle **4.0x** vs heap nodes (stable, 3.6-4.8x over 6 runs); erase given a payload pointer is **O(n) -> O(1)** (`6.1e3x` at n=8192, ratio scales with n) |
+| push | **1.1x** vs heap nodes, and **no win at all** vs pooled nodes (0.65-1.35x across runs: a tie, sometimes a loss) |
+
+Read that table honestly: the win is **not** "intrusive layouts are magic in cache". Traversal against *well-pooled* nodes is 1.41x, and push is a wash, because a bump-allocated node array is already contiguous. What intrusiveness actually buys is (a) that you are **not forced to allocate per element**, and (b) that **the object can find its own place in the structure**, which is what turns find-then-erase from O(n) into O(1) - a reformulation, and the only row in that table that grows with n. The cache-locality advantage only appears when the alternative is one `malloc` per node; against a good pooled allocator it is a 1.4x coefficient, not a structure of the world.
+
+**Requirements for any intrusive container in `mu/`:**
+1. The link is a small POD (`mu_dlink` is two pointers; `mu_rb_node` is parent+left+right) embedded by value in the user's struct.
+2. Iteration returns the link; the caller recovers the payload with `mu_container_of`. The container never knows the payload type.
+3. Removal takes the link, never a key. If you find yourself writing `container_erase(container, key)` on a list or tree, you have re-created the O(n) problem.
+4. An object may be in **several** containers at once by embedding one link per container. Never multiplex a single link across containers.
+5. Provide `*_is_linked()` so a double erase or a double push is a checkable bug, not corruption.
+6. Document the memory cost: `mu_skiplist` nodes borrow pooled per-level arrays (recycled, so steady-state zero allocation), because a variable-height link cannot be embedded at fixed size without wasting the average case.
+
+**When NOT to make it intrusive** (and say so in the header):
+- The object must live in many containers and embedding a link per container is bigger than the container's own node would be.
+- The object's lifetime is shorter than its membership (a temporary key in a lookup structure).
+- The layout is a hot SoA stream where a link field would break the unit-stride access pattern (section 3.2 wins over 3.15).
+- You need stable references while the container is copied or moved: an intrusive container must never be
+  shallow-copied, because both copies would then share links.
+
+**Checklist before shipping a container:**
+- [ ] Can a caller erase an element in O(1) using only the element? If no, why not?
+- [ ] Is there any allocation in the steady state? If yes, is it pooled and recycled, and does a test prove the recycling (`test_skiplist.c` asserts it)?
+- [ ] Does the header state the link's size and what happens when the payload is memset to zero?
+- [ ] Is there a structural validator (`mu_sl_validate`) for tests to call?
+- [ ] Benchmarked against the node-owning alternative, with allocations counted, not just ns?
+
+### 3.16 Transform Normals With the Cofactor Matrix, Not `inverse(M)^T`
+
+*(Source: graphitemaster, `normals_revisited`; implementation `mu_mat3_cofactor` / `mu_mat4_normal` in `mu/mu_math.h`; evidence `perf_test/bench_normals.c` + `perf_test/PERF_NORMALS.md`; narrative `docs/normals.md`)*
+
+**The rule.** A normal is transformed by the **cofactor matrix** `C = det(A) * inverse(A)^T`, which for columns `a0, a1, a2` is `[a1 x a2, a2 x a0, a0 x a1]`. Never write `transpose(inverse(M)) * n`.
+
+Two reasons, and the second one is why this is a rule and not a micro-optimization:
+
+1. **`inverse(M)^T` is the wrong operator.** It is derived from `n' · t' = 0`, which admits both orientations and silently picks the wrong one when `det(M) < 0`. A reflecting transform then produces a normal that points into the surface, every `max(0, dot(n, l))` evaluates to 0, and the object is lit inside-out. Correctness bug, not a performance bug - so no benchmark threshold would ever have caught it.
+2. **It is 3.1x cheaper** on 4x4 (3.58 ns vs 11.03 ns, cv 1.1%/1.2%, 21 samples, 64 skewed matrices, one pinned core): three cross products and a 3x3 multiply instead of a full 4x4 adjugate plus two more passes. On 3x3 it is only 1.13x, but the reflection bug is identical.
+
+Consequences for other code:
+- The result of `C` is **not** normalized and scales by `det`; normalize at the call site if the consumer needs unit length.
+- A rotation matrix needs no special path (`C == A`); a uniform scale gives `C == s^2 * A`; the translation column is never read.
+- `test_math.c` asserts the reflection case in both directions: the cofactor normal keeps `-z`, and `inverse(M)^T` returns `+z`. That second assertion exists so that "simplifying" the function back to an inverse-transpose fails the build with an explanation instead of shipping.
+
 ---
 
 ## 4. Existence-based processing

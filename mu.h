@@ -65,6 +65,15 @@
 #include "mu/mu_four_heap.h"
 #include "mu/mu_timer_wheel.h"
 #include "mu/mu_fast_codec.h"
+#include "mu/mu_math.h"
+#include "mu/mu_dlist.h"
+#include "mu/mu_skiplist.h"
+#include "mu/mu_scope_stack.h"
+#include "mu/mu_log.h"
+
+/* mu/mu_bench.h is deliberately NOT in the umbrella: it defines a benchmark
+ * registry and a main(), so it belongs in exactly one translation unit of a
+ * benchmark binary, not in every file that includes mu.h. */
 
 /* mu/mu_rand.h is intentionally not part of the umbrella; include it directly
    if you want its competing RNG alongside mu_pcg32. */

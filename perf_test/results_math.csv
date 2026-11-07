@@ -1,0 +1,35 @@
+suite,case,ns_per_op,cyc_per_op,speedup_vs_cglm,cv_pct,checksum
+call,"vec3_dot",0.7852,2.291,1.005,0.729,1375677
+call,"vec3_cross",0.7314,2.134,0.999,0.248,1450125
+call,"vec3_add",0.7275,2.123,0.999,0.253,1153195
+call,"vec3_normalize",0.7432,2.169,1.022,0.682,33483
+call,"vec3_normalize_fast",1.8203,5.312,0.423,0.374,33483
+call,"vec3_normalize (dependent chain)",15.4697,45.142,1.000,1.940,20737
+call,"vec3_normalize_fast (chain)",14.2983,41.724,1.047,10.216,20737
+call,"mat4_mul",2.2461,6.554,1.697,0.574,2271194
+call,"mat4_mul_affine",1.5156,4.423,2.564,2.386,6468707
+call,"mat4_mulv",0.7061,2.060,2.888,1.699,97054332
+call,"mat4_point (hot matrix)",0.7041,2.055,2.895,0.654,97054332
+call,"mat4_transpose",1.2656,3.693,1.951,1.581,499719
+call,"mat4_inverse (general)",7.0312,20.518,0.939,0.466,594034
+call,"inverse_rigid (rigid)",0.7969,2.325,0.995,1.104,2101166
+call,"inverse_affine (rigid)",1.8984,5.540,0.416,0.899,2101167
+call,"inverse_affine vs general inv",1.9023,5.551,3.427,0.382,2101167
+call,"inverse_affine (scaled)",1.8984,5.540,3.479,3.131,1844650
+call,"mat3_inverse_transpose",2.4805,7.238,0.965,1.506,1844650
+call,"quat_mul",0.9531,2.781,2.525,0.964,214307
+call,"quat_rotate_vec3",3.7695,11.000,2.518,0.353,31569473
+call,"quat_slerp",20.4102,59.559,1.031,27.681,83313
+call,"mat4_from_quat",0.7500,2.189,4.013,0.707,4312778
+call,"mat4_from_quat +norm",3.2129,9.376,0.937,48.354,4312778
+call,"perspective",1.1406,3.328,0.986,7.199,1408000
+batch,"xform 1M pts (cglm doing the work)",0.8964,2.616,2.655,2.914,2942776
+batch,"xform 1M pts (same layout, C loop)",0.8703,2.540,2.953,3.871,2942776
+batch,"xform 64K pts x8",0.2677,0.781,8.882,11.758,977012
+batch,"normalize 1M vec3",0.8933,2.607,2.516,3.430,40422
+batch,"rotate 1M pts by 1 quat (SoA)",0.8945,2.610,4.204,3.343,88728
+batch,"rotate 1M (mu per-call loop)",3.3942,9.905,1.003,5.691,135141434
+batch,"frustum cull 1M spheres",0.4726,1.379,27.611,6.475,3102550000
+batch,"mat4 palette 256 (pack+unpack)",3.4141,9.963,0.992,0.552,150929
+batch,"mat4 palette 256 (pack each iter)",4.1797,12.197,0.813,1.367,1463312
+batch,"mat4 palette 256 (kernel only)",1.9844,5.791,1.707,1.761,19390056373923

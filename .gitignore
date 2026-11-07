@@ -1,3 +1,18 @@
 tags
 /build
 
+
+# perf_test binaries (built by `make -C perf_test ...`)
+/perf_test/test_math
+/perf_test/test_skiplist
+/perf_test/test_scope_stack
+/perf_test/test_log
+/perf_test/test_bench
+/perf_test/test_wfc
+/perf_test/bench_math
+/perf_test/bench_normals
+/perf_test/bench_intrusive
+/perf_test/bench_wfc
+/perf_test/results_math_stdout.txt
+/perf_test/card_asm_dump.s
+/perf_test/bench-normals

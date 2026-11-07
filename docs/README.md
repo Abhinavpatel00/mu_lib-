@@ -20,6 +20,11 @@ Subsystems ship as their own single headers:
 #include "mu/offset_allocator.h"     /* two-level bin free-space allocator        */
 #include "mu/mu_mmgr.h"              /* leak/corruption tracking malloc shim      */
 #include "mu/mu_min_containers.h"    /* standalone stretchy buffer + hash64       */
+#include "mu/mu_skiplist.h"          /* intrusive skip list with widths           */
+#include "mu/mu_dlist.h"             /* intrusive doubly-linked list             */
+#include "mu/mu_scope_stack.h"       /* scoped linear allocator + destructors     */
+#include "mu/mu_log.h"               /* flexible logging, zero allocation         */
+#include "mu/mu_bench.h"             /* benchmark harness (one TU per binary)     */
 ```
 
 ## Documentation index
@@ -27,6 +32,12 @@ Subsystems ship as their own single headers:
 | Doc | Contents |
 |-----|----------|
 | [core.md](core.md) | `mu/mu_common.h` macros, bit intrinsics, `mu/mu_allocators.h` (linear/ring), `mu/mu_perf.h`, `mu/mu_pcg.h` |
+| [intrusive.md](intrusive.md) | `mu/mu_dlist.h`: intrusive doubly-linked list, the AGENTS.md 3.15 rule, and the measured intrusive-vs-node-owning numbers |
+| [skiplist.md](skiplist.md) | `mu/mu_skiplist.h`: intrusive skip list with widths (order statistics), pooled recycled level blocks, embedded nodes |
+| [bench.md](bench.md) | `mu/mu_bench.h`: ubench-style micro-benchmark harness, the input-operand barrier, auto-sized batches, 99% CI, CSV |
+| [log.md](log.md) | `mu/mu_log.h`: levels, per-category thresholds, 4 sink kinds, ring buffer, structured kv, compile-time strip |
+| [scope-stack.md](scope-stack.md) | `mu/mu_scope_stack.h`: scoped linear allocator with destructors, `cleanup`-based auto rewind, longjmp purge |
+| [normals.md](normals.md) | `mu_mat3_cofactor` / `mu_mat4_normal`: cofactor instead of inverse-transpose (2.9x, and correct under reflection) |
 | [debug-break.md](debug-break.md) | `mu/mu_debug_break.h`: portable software breakpoint / `MU_DEBUG_BREAK()` |
 | [allocators.md](allocators.md) | `mu/allocators.h` arena/pool/buddy, `mu/offset_allocator.h`, `mu/mu_mmgr.h` |
 | [containers.md](containers.md) | `array`, `mu_span`, `mu_string_arena`, `mu_pool_link`/lists/freelists, `mu/mu_min_containers.h` |
@@ -42,6 +53,7 @@ Subsystems ship as their own single headers:
 | [dag.md](dag.md) | `mu_dag`: dynamic dependency graph with bottom-up traversal |
 | [range-remap.md](range-remap.md) | `mu_range_remap`: sorted range-to-pointer map |
 | [math.md](math.md) | `mu/mu_noise_math.h`, `mu/mu_geometric_algebra.h`, `mu_bitpacking.h` quantization |
+| [mu_math.md](mu_math.md) | `mu/mu_math.h` — vec/quat/mat core, three inverse paths, SoA batch kernels; measured vs cglm |
 | [ecs.md](ecs.md) | `mu/mu_ecs.h`: entity manager, pools, transforms, prefabs, resource registry |
 | [concurrency.md](concurrency.md) | `mu/mu_thread_system.h`, `mu/mu_task_scheduler.h` |
 | [roguelike.md](roguelike.md) | `mu/mu_roguelike.h`: RNG, grids, generation, FOV, pathfinding, tick scheduler |

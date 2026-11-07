@@ -52,10 +52,76 @@ run-proofs: $(ST_PROOFS)
 	./bench_advanced_c_isa
 	./bench_mylib_upgrade
 
+# ---------------------------------------------------------------------------
+# mu_math.h: correctness gate + cglm comparison bench.
+#
+# CGLM_INC points at a cglm checkout (header-only). Both targets need it.
+#   make -C perf_test math-test                      # gate only
+#   make -C perf_test math-bench                     # full paired table + CSV
+# ---------------------------------------------------------------------------
+CGLM_INC ?= ../../cglm/include
+
+math-test: test_math
+	./test_math
+
+test_math: test_math.c ../mu/mu_math.h
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(CGLM_INC) -o $@ test_math.c -lm
+
+# The math bench is measured, not proof-of-concept: it wants >=21 paired reps
+# on one pinned core, so it is NOT part of run-proofs.
+math-bench: bench_math
+	./bench_math 0
+
+bench_math: bench_math_vs_cglm.c ../mu/mu_math.h
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(CGLM_INC) -o $@ bench_math_vs_cglm.c -lm
+
 run-mt-proofs: $(MT_PROOFS)
 	./bench_multithreading_separate
 
-clean:
-	rm -f $(ORIG_TARGETS) $(ST_PROOFS) $(MT_PROOFS) card_asm_dump.s
+# ---------------------------------------------------------------------------
+# New-header gates and benchmarks (mu_bench, mu_log, mu_dlist, mu_skiplist,
+# mu_scope_stack, and the cofactor normal transform).
+# ---------------------------------------------------------------------------
+DS_TESTS = test_skiplist test_scope_stack test_log test_bench test_wfc
 
-.PHONY: all run-proofs run-mt-proofs clean
+test_wfc: test_wfc.c ../mu/mu_wfc.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_wfc.c -lm
+
+wfc-test: test_wfc
+	./test_wfc
+
+wfc-bench: bench_wfc.c ../mu/mu_wfc.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o bench_wfc bench_wfc.c -lm
+	./bench_wfc
+
+ds-test: $(DS_TESTS)
+	@for t in $(DS_TESTS); do ./$$t || exit 1; done
+
+test_skiplist: test_skiplist.c ../mu/mu_skiplist.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_skiplist.c
+
+test_scope_stack: test_scope_stack.c ../mu/mu_scope_stack.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_scope_stack.c
+
+test_log: test_log.c ../mu/mu_log.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_log.c
+
+test_bench: test_bench.c ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_bench.c -lm
+
+# The intrusive-vs-node benchmark wants a large working set and many paired
+# reps, so it is not part of run-proofs: it is measured on a pinned core.
+bench-intrusive: bench_intrusive.c ../mu/mu_dlist.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o bench_intrusive bench_intrusive.c -lm
+	taskset -c 0 ./bench_intrusive 1048576
+
+# Cofactor normal transform vs transpose(inverse(M)), via mu_bench.h.
+bench-normals: bench_normals.c ../mu/mu_math.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o bench_normals bench_normals.c -lm
+	taskset -c 0 ./bench_normals --samples=21 --confidence=6
+
+clean:
+	rm -f $(ORIG_TARGETS) $(ST_PROOFS) $(MT_PROOFS) card_asm_dump.s \
+	      test_math bench_math results_math.csv $(DS_TESTS) bench_intrusive bench_normals bench_wfc
+
+.PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals clean
