@@ -69,6 +69,7 @@
 #include "mu/mu_dlist.h"
 #include "mu/mu_skiplist.h"
 #include "mu/mu_shapes.h"
+#include "mu/mu_easing.h"
 #include "mu/mu_scope_stack.h"
 #include "mu/mu_log.h"
 

@@ -26,6 +26,7 @@ Subsystems ship as their own single headers:
 #include "mu/mu_log.h"               /* flexible logging, zero allocation         */
 #include "mu/mu_bench.h"             /* benchmark harness (one TU per binary)     */
 #include "mu/mu_shapes.h"            /* parametric shapes, SDF bake, L-systems    */
+#include "mu/mu_easing.h"            /* 33 curves, derivatives, Bezier, LUT       */
 ```
 
 ## Documentation index
@@ -38,6 +39,7 @@ Subsystems ship as their own single headers:
 | [bench.md](bench.md) | `mu/mu_bench.h`: ubench-style micro-benchmark harness, the input-operand barrier, auto-sized batches, 99% CI, CSV |
 | [log.md](log.md) | `mu/mu_log.h`: levels, per-category thresholds, 4 sink kinds, ring buffer, structured kv, compile-time strip |
 | [scope-stack.md](scope-stack.md) | `mu/mu_scope_stack.h`: scoped linear allocator with destructors, `cleanup`-based auto rewind, longjmp purge |
+| [easing.md](easing.md) | `mu/mu_easing.h`: 33 Penner curves (par\_easings.h extended and corrected), curves as data, analytic velocities, parametric back/elastic, CSS cubic-bezier, Fritsch-Carlson monotone spline, CSS steps, baked LUTs; measured vs `par_easings.h` (geomean 1.27x) |
 | [shapes.md](shapes.md) | `mu/mu_shapes.h`: supershape, seashell, Möbius, Klein, RMF tube, lathe, twist extrusion, SDF→mesh (marching tets), L-systems, weld/subdivide/stats/validate; measured vs `par_shapes.h` |
 | [normals.md](normals.md) | `mu_mat3_cofactor` / `mu_mat4_normal`: cofactor instead of inverse-transpose (2.9x, and correct under reflection) |
 | [debug-break.md](debug-break.md) | `mu/mu_debug_break.h`: portable software breakpoint / `MU_DEBUG_BREAK()` |

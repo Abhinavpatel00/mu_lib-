@@ -18,5 +18,8 @@ tags
 /perf_test/bench-normals
 /perf_test/test_shapes
 /perf_test/bench_shapes
+/perf_test/test_easing
+/perf_test/bench_easing
+/perf_test/bench_easing_vs_par
 /perf_test/bench_shapes_vs_par
 /perf_test/shapes_out.obj

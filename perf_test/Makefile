@@ -149,10 +149,40 @@ shapes-par: bench_shapes_vs_par
 bench_shapes_vs_par: bench_shapes_vs_par.c ../mu/mu_shapes.h ../mu/mu_bench.h $(PAR_SHAPES)
 	$(CC) $(CFLAGS) -Wno-unused-parameter $(INCLUDES) -I../.. -o $@ bench_shapes_vs_par.c -lm
 
+# ---------------------------------------------------------------------------
+# mu_easing.h: correctness gate, per-call/batch benchmark, and the
+# par_easings.h comparison. PAR_EASINGS points at a par_easings.h checkout; the
+# gate uses it for a parity section when it is there and skips it when it is not.
+# ---------------------------------------------------------------------------
+PAR_EASINGS ?= ../../par_easings.h
+PAR_EASING_FLAGS = $(if $(wildcard $(PAR_EASINGS)),-DMU_EASING_WITH_PAR -I../..,)
+
+easing-test: test_easing
+	./test_easing
+
+test_easing: test_easing.c ../mu/mu_easing.h $(wildcard $(PAR_EASINGS))
+	$(CC) $(CFLAGS) $(INCLUDES) $(PAR_EASING_FLAGS) -o $@ test_easing.c -lm
+
+# Wants >=21 samples on one pinned core: not part of run-proofs.
+easing-bench: bench_easing
+	taskset -c 0 ./bench_easing --samples=21 --confidence=6
+
+bench_easing: bench_easing.c ../mu/mu_easing.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_easing.c -lm
+
+# -Wno-unused-parameter: par_easings.h's own helpers take unused (b, c, d)
+# parameters. It is upstream code; not ours to fix.
+easing-par: bench_easing_vs_par
+	@test -f $(PAR_EASINGS) || { echo "missing $(PAR_EASINGS); set PAR_EASINGS=<path to par_easings.h>"; exit 1; }
+	sh easing_vs_par.sh
+
+bench_easing_vs_par: bench_easing_vs_par.c ../mu/mu_easing.h ../mu/mu_bench.h $(PAR_EASINGS)
+	$(CC) $(CFLAGS) -Wno-unused-parameter $(INCLUDES) -I../.. -o $@ bench_easing_vs_par.c -lm
+
 clean:
 	rm -f $(ORIG_TARGETS) $(ST_PROOFS) $(MT_PROOFS) card_asm_dump.s \
 	      test_math bench_math results_math.csv $(DS_TESTS) bench_intrusive bench_normals bench_wfc \
-	      test_shapes bench_shapes bench_shapes_vs_par
+	      test_shapes bench_shapes bench_shapes_vs_par test_easing bench_easing bench_easing_vs_par
 
 .PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals \
-        shapes-test shapes-bench shapes-par clean
+        shapes-test shapes-bench shapes-par easing-test easing-bench easing-par clean
