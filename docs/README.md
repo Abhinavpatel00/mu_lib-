@@ -27,6 +27,7 @@ Subsystems ship as their own single headers:
 #include "mu/mu_bench.h"             /* benchmark harness (one TU per binary)     */
 #include "mu/mu_shapes.h"            /* parametric shapes, SDF bake, L-systems    */
 #include "mu/mu_easing.h"            /* 33 curves, derivatives, Bezier, LUT       */
+#include "mu/mu_time.h"             /* steady clock, calendar, ISO 8601, durations   */
 ```
 
 ## Documentation index
@@ -38,6 +39,7 @@ Subsystems ship as their own single headers:
 | [skiplist.md](skiplist.md) | `mu/mu_skiplist.h`: intrusive skip list with widths (order statistics), pooled recycled level blocks, embedded nodes |
 | [bench.md](bench.md) | `mu/mu_bench.h`: ubench-style micro-benchmark harness, the input-operand barrier, auto-sized batches, 99% CI, CSV |
 | [log.md](log.md) | `mu/mu_log.h`: levels, per-category thresholds, 4 sink kinds, ring buffer, structured kv, compile-time strip |
+| [time.md](time.md) | `mu/mu_time.h`: steady vs wall clock, proleptic Gregorian calendar, ISO 8601 timestamps, duration formatting; fixes `mu_log.h`'s "monotonic" timestamp; measured vs glibc (format 5.7x/8.1x, parse 4.1x, 8 179 268-check gate) |
 | [scope-stack.md](scope-stack.md) | `mu/mu_scope_stack.h`: scoped linear allocator with destructors, `cleanup`-based auto rewind, longjmp purge |
 | [easing.md](easing.md) | `mu/mu_easing.h`: 33 Penner curves (par\_easings.h extended and corrected), curves as data, analytic velocities, parametric back/elastic, CSS cubic-bezier, Fritsch-Carlson monotone spline, CSS steps, baked LUTs; measured vs `par_easings.h` (geomean 1.27x) |
 | [shapes.md](shapes.md) | `mu/mu_shapes.h`: supershape, seashell, Möbius, Klein, RMF tube, lathe, twist extrusion, SDF→mesh (marching tets), L-systems, weld/subdivide/stats/validate; measured vs `par_shapes.h` |

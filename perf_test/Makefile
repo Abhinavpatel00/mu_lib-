@@ -256,12 +256,41 @@ alloc-bench-big: bench_allocators.c ../mu/allocators.h ../mu/mu_bench.h
 	$(CC) $(CFLAGS) -DCHUNK=1024u $(INCLUDES) -o bench_allocators_big bench_allocators.c -lm
 	-taskset -c 0 ./bench_allocators_big --filter=mergeburst --samples=21
 
+# ---------------------------------------------------------------------------
+# mu_time.h: calendar / ISO 8601 / duration gate, the mu_bench cost table, and
+# the interleaved paired A/B that decides whether a difference is real.
+#
+# The gate is exhaustive rather than sampled where it can be: every day from
+# 0000-01-01 to 9999-12-31 round-trips, every one of those days is formatted and
+# compared against snprintf byte for byte, all 86 400 seconds of two days are
+# formatted, and every fraction width 0..9 is checked against an independently
+# computed truncation.
+#
+#   make -C perf_test time-test     # gate (8.18M checks, ~1 s)
+#   make -C perf_test time-bench    # mu_bench table, 28 rows
+#   make -C perf_test time-pairs    # interleaved A/B ratios (the trustworthy numbers)
+# ---------------------------------------------------------------------------
+time-test: test_time
+	./test_time
+
+test_time: test_time.c ../mu/mu_time.h ../mu/mu_macros.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_time.c
+
+time-bench: bench_time
+	-taskset -c 0 ./bench_time --samples=61
+
+bench_time: bench_time.c ../mu/mu_time.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_time.c -lm
+
+time-pairs: bench_time
+	taskset -c 0 ./bench_time --pairs
+
 clean:
 	rm -f $(ORIG_TARGETS) $(ST_PROOFS) $(MT_PROOFS) card_asm_dump.s \
 	      test_math bench_math results_math.csv $(DS_TESTS) bench_intrusive bench_normals bench_wfc \
 	      test_shapes bench_shapes bench_shapes_vs_par test_easing bench_easing bench_easing_vs_par \
 	      test_roguelike bench_roguelike test_noise bench_noise test_allocators \
-      bench_allocators bench_allocators_big
+      bench_allocators bench_allocators_big test_time bench_time
 
 .PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals \
         shapes-test shapes-bench shapes-par easing-test easing-bench easing-par \

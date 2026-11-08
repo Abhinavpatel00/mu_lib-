@@ -68,6 +68,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "mu_time.h"   /* the steady clock; see the note below */
+
 #if defined(__GNUC__) || defined(__clang__)
 #  define MU_LOG__UNUSED   __attribute__((unused))
 #  define MU_LOG__PRINTF(a, b) __attribute__((format(printf, a, b)))
@@ -137,7 +139,7 @@ typedef struct mu_log_record
     const char *func;
     int         line;
     int         level;
-    uint64_t    time_ns;    /* monotonic, from the process start */
+    uint64_t    time_ns;    /* CLOCK_MONOTONIC, from the process start */
     double      time_s;     /* seconds, same origin, for humans */
     /* Either msg is set, or n_kv > 0. Both may be set: msg is the human
      * summary, kv the machine detail. */
@@ -238,40 +240,29 @@ MU_LOG__UNUSED static const char *mu_log_level_color(int level)
  * clock
  * --------------------------------------------------------------------------
  *
- * Deliberately NOT clock_gettime. That needs _POSIX_C_SOURCE to be defined
- * before the first system header, which a library header cannot guarantee: any
- * translation unit that includes <stdio.h> before this file gets an implicit
- * declaration and a build error on the user's side. timespec_get is C11, needs
- * no feature macro, and is what the library already targets.
+ * This used to be `timespec_get(TIME_UTC)` under C11 and `clock()` under C99,
+ * under a field documented as "monotonic, from the process start". Both of those
+ * are wrong for that field: TIME_UTC is a wall clock that steps backwards when
+ * NTP corrects it, and clock() is CPU time, so the two builds did not even agree
+ * on what a timestamp meant. The stated reason for not using clock_gettime —
+ * that _POSIX_C_SOURCE cannot be defined from inside a library header — is no
+ * longer true: mu_macros.h owns that define and runs before the first system
+ * header in every mu header.
+ *
+ * So the clock now comes from mu_time.h: CLOCK_MONOTONIC where the platform has
+ * it, with mu_time_is_monotonic() telling the truth about the fallback.
+ * `time_ns` is therefore genuinely monotonic, and so is MU_LOG_TIME_SCOPE (a
+ * wall clock could previously produce a negative duration).
+ *
+ * The origin is the first mu_clock_ns() this translation unit saw. If a sink
+ * wants a wall-clock timestamp for a log line, it should format one itself at
+ * record time (mu_iso8601_format_now_ms) rather than have every record pay for
+ * a second clock read it may never use.
  */
-#if defined(_MSC_VER)
-#  include <windows.h>
 MU_LOG__UNUSED static uint64_t mu_log__now_ns(void)
 {
-    static LARGE_INTEGER freq;
-    static int           init = 0;
-    LARGE_INTEGER        t;
-
-    if (!init) { QueryPerformanceFrequency(&freq); init = 1; }
-    QueryPerformanceCounter(&t);
-    return (uint64_t)((double)t.QuadPart * 1e9 / (double)freq.QuadPart);
+    return mu_clock_elapsed_ns();
 }
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-#  include <time.h>
-MU_LOG__UNUSED static uint64_t mu_log__now_ns(void)
-{
-    struct timespec ts;
-
-    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0u;
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-#else
-#  include <time.h>
-MU_LOG__UNUSED static uint64_t mu_log__now_ns(void)
-{
-    return (uint64_t)clock() * (1000000000ull / (uint64_t)CLOCKS_PER_SEC);
-}
-#endif
 
 /* --------------------------------------------------------------------------
  * configure

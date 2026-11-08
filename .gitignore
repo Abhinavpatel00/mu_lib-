@@ -29,3 +29,6 @@ tags
 /perf_test/bench_noise
 /perf_test/test_allocators
 /perf_test/bench_allocators
+/perf_test/bench_allocators_big
+/perf_test/test_time
+/perf_test/bench_time
