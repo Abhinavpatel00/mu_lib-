@@ -179,10 +179,30 @@ easing-par: bench_easing_vs_par
 bench_easing_vs_par: bench_easing_vs_par.c ../mu/mu_easing.h ../mu/mu_bench.h $(PAR_EASINGS)
 	$(CC) $(CFLAGS) -Wno-unused-parameter $(INCLUDES) -I../.. -o $@ bench_easing_vs_par.c -lm
 
+# ---------------------------------------------------------------------------
+# mu_roguelike.h: correctness gate plus the algorithmic A/B benches. The
+# baselines (the previous FOV, the previous FIFO distance field, the previous
+# duplicate-push A*, the rejection-sampling room generator) live in
+# bench_roguelike.c so both sides of every comparison are in one binary.
+# ---------------------------------------------------------------------------
+rogue-test: test_roguelike
+	./test_roguelike
+
+test_roguelike: test_roguelike.c ../mu/mu_roguelike.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_roguelike.c -lm
+
+# Wants >=21 samples on one pinned core: not part of run-proofs.
+rogue-bench: bench_roguelike
+	taskset -c 0 ./bench_roguelike --samples=21 --confidence=6
+
+bench_roguelike: bench_roguelike.c ../mu/mu_roguelike.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_roguelike.c -lm
+
 clean:
 	rm -f $(ORIG_TARGETS) $(ST_PROOFS) $(MT_PROOFS) card_asm_dump.s \
 	      test_math bench_math results_math.csv $(DS_TESTS) bench_intrusive bench_normals bench_wfc \
-	      test_shapes bench_shapes bench_shapes_vs_par test_easing bench_easing bench_easing_vs_par
+	      test_shapes bench_shapes bench_shapes_vs_par test_easing bench_easing bench_easing_vs_par \
+	      test_roguelike bench_roguelike
 
 .PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals \
         shapes-test shapes-bench shapes-par easing-test easing-bench easing-par clean
