@@ -1445,4 +1445,247 @@ MU_INLINE bool mu_quill_load(mu_quill* q, const char* text, size_t len)
     return true;
 }
 
+/* ==========================================================================
+ * Cursor, zero-copy spans, and sequential viewport views
+ * ========================================================================== */
+
+typedef struct mu_quill_cursor
+{
+    uint32_t offset;
+    uint32_t line;
+    uint32_t col; /* bytes from line start, not display cells */
+} mu_quill_cursor;
+
+/* Contiguous physical run starting at `offset`. The returned pointer is valid
+ * until the next mutation of q. This is the zero-copy feed for Tree-sitter's
+ * TSInput.read: no whole-document flatten, no per-chunk memcpy. */
+MU_INLINE const uint8_t* mu_quill_span(const mu_quill* q, uint32_t offset,
+                                       uint32_t* MU_RESTRICT len)
+{
+    const mu_quill_chunk* c;
+    const uint8_t* b;
+    uint32_t i, p, gl;
+
+    *len = 0u;
+    if (offset >= q->text_len)
+        return NULL;
+    i = mu_quill__by_byte(q, offset);
+    if (i == UINT32_MAX)
+        return NULL;
+    c  = q->ch[i];
+    p  = offset - mu_quill__bstart(q, i);
+    gl = MU_QUILL_CHUNK - c->nbytes;
+    b  = mu_quill__buf(q, c);
+    if (p < c->gap)
+    {
+        *len = c->gap - p;
+        return b + p;
+    }
+    *len = c->nbytes - p;
+    return b + p + gl;
+}
+
+MU_INLINE uint32_t mu_quill_cursor_to_offset(mu_quill* q, uint32_t line, uint32_t col)
+{
+    uint32_t off;
+    if (q->nlines == 0u)
+        return 0u;
+    if (line >= q->nlines)
+        line = q->nlines - 1u;
+    off = mu_quill_line_offset(q, line);
+    {
+        const uint32_t next = (line + 1u < q->nlines)
+            ? mu_quill_line_offset(q, line + 1u) - 1u
+            : q->text_len;
+        return off + MU_MIN(col, next - off);
+    }
+}
+
+MU_INLINE mu_quill_cursor mu_quill_offset_to_cursor(mu_quill* q, uint32_t offset)
+{
+    mu_quill_cursor r;
+    mu_quill_chunk* c;
+    uint32_t i, p, lo, hi, k, base, ls;
+
+    r.offset = MU_MIN(offset, q->text_len);
+    r.line   = 0u;
+    r.col    = 0u;
+    if (q->text_len == 0u)
+        return r;
+    if (r.offset == q->text_len)
+    {
+        r.line = q->nlines - 1u;
+        r.col  = r.offset - mu_quill_line_offset(q, r.line);
+        return r;
+    }
+
+    i = mu_quill__by_byte(q, r.offset);
+    if (i == UINT32_MAX)
+        return r;
+    /* A chunk boundary after a newline belongs to the start owned by the
+     * predecessor (p+1 == nbytes). Stay on that predecessor so col == 0. */
+    if (i > 0u && mu_quill__bstart(q, i) == r.offset)
+        --i;
+    mu_quill__starts(q, i);
+    c    = q->ch[i];
+    base = mu_quill__bstart(q, i);
+    p    = r.offset - base;
+    ls   = mu_quill__lstart(q, i);
+    if (c->nstarts == 0u || (uint32_t)c->starts[0] > p)
+    {
+        r.line = ls ? ls - 1u : 0u;
+        r.col  = r.offset - mu_quill_line_offset(q, r.line);
+        return r;
+    }
+    lo = 0u; hi = c->nstarts;
+    while (lo + 1u < hi)
+    {
+        const uint32_t mid = (lo + hi) >> 1;
+        if ((uint32_t)c->starts[mid] <= p) lo = mid; else hi = mid;
+    }
+    k = lo;
+    r.line = ls + k;
+    r.col  = p - (uint32_t)c->starts[k];
+    return r;
+}
+
+/* Sequential line view: ONE descent, then a forward walk over chunk starts.
+ * This is the viewport/scroll path. It avoids the per-line descent that made
+ * true incremental scrolling slower than mu_ted in round 9. */
+typedef struct mu_quill_view
+{
+    uint32_t i;     /* chunk index */
+    uint32_t local; /* start index inside chunk */
+    uint32_t base;  /* absolute byte base of chunk */
+    uint32_t line;  /* next absolute line index */
+} mu_quill_view;
+
+MU_INLINE bool mu_quill_view_start(mu_quill* q, uint32_t line,
+                                   mu_quill_view* MU_RESTRICT v)
+{
+    uint32_t i;
+    if (line >= q->nlines)
+    {
+        v->i = q->nch; v->local = 0u; v->base = 0u; v->line = q->nlines;
+        return false;
+    }
+    i = mu_quill__by_line(q, line);
+    if (i == UINT32_MAX)
+    {
+        v->i = q->nch; v->local = 0u; v->base = 0u; v->line = q->nlines;
+        return false;
+    }
+    mu_quill__starts(q, i);
+    v->i     = i;
+    v->local = line - mu_quill__lstart(q, i);
+    v->base  = mu_quill__bstart(q, i);
+    v->line  = line;
+    return true;
+}
+
+/* Advance to the next chunk that owns a line start. Chunks with zero starts
+ * are continuations of a long line and cannot begin a new line. */
+MU_INLINE bool mu_quill__view_next_chunk(mu_quill* q, mu_quill_view* v)
+{
+    uint32_t j = v->i + 1u;
+    while (j < q->nch)
+    {
+        const uint32_t ns = q->ch[j]->nl + (j == 0u ? 1u : 0u);
+        if (ns != 0u)
+        {
+            mu_quill__starts(q, j);
+            v->i     = j;
+            v->local = 0u;
+            v->base  = mu_quill__bstart(q, j);
+            return true;
+        }
+        ++j;
+    }
+    v->i = q->nch;
+    return false;
+}
+
+MU_INLINE uint32_t mu_quill__view_len(mu_quill* q, const mu_quill_view* v,
+                                      uint32_t ns, uint32_t off)
+{
+    const mu_quill_chunk* c = q->ch[v->i];
+    if (v->local + 1u < ns)
+        return (uint32_t)c->starts[v->local + 1u] - (uint32_t)c->starts[v->local] - 1u;
+    if (v->line + 1u >= q->nlines)
+        return q->text_len - off;
+    {
+        mu_quill_view peek = *v;
+        if (!mu_quill__view_next_chunk(q, &peek))
+            return q->text_len - off;
+        return peek.base + (uint32_t)q->ch[peek.i]->starts[0] - off - 1u;
+    }
+}
+
+MU_INLINE bool mu_quill_view_next(mu_quill* q, mu_quill_view* MU_RESTRICT v,
+                                  mu_quill_line* MU_RESTRICT out)
+{
+    mu_quill_chunk* c;
+    uint32_t ns, off;
+
+    if (v->line >= q->nlines || v->i >= q->nch)
+        return false;
+    c  = q->ch[v->i];
+    ns = c->nl + (v->i == 0u ? 1u : 0u);
+    if (v->local >= ns)
+    {
+        if (!mu_quill__view_next_chunk(q, v))
+            return false;
+        c  = q->ch[v->i];
+        ns = c->nl + (v->i == 0u ? 1u : 0u);
+    }
+    off = v->base + (uint32_t)c->starts[v->local];
+    out->offset = off;
+    out->len    = mu_quill__view_len(q, v, ns, off);
+    ++v->line;
+    ++v->local;
+    if (v->local >= ns)
+        (void)mu_quill__view_next_chunk(q, v);
+    return true;
+}
+
+MU_INLINE bool mu_quill_view_next_text(mu_quill* q, mu_quill_view* MU_RESTRICT v,
+                                       char* MU_RESTRICT dst, uint32_t cap,
+                                       mu_quill_line* MU_RESTRICT out)
+{
+    mu_quill_chunk* c;
+    uint32_t ns, off, len, n, p;
+
+    if (v->line >= q->nlines || v->i >= q->nch)
+        return false;
+    c  = q->ch[v->i];
+    ns = c->nl + (v->i == 0u ? 1u : 0u);
+    if (v->local >= ns)
+    {
+        if (!mu_quill__view_next_chunk(q, v))
+            return false;
+        c  = q->ch[v->i];
+        ns = c->nl + (v->i == 0u ? 1u : 0u);
+    }
+    off = v->base + (uint32_t)c->starts[v->local];
+    len = mu_quill__view_len(q, v, ns, off);
+    out->offset = off;
+    out->len    = len;
+
+    n = MU_MIN(len, cap);
+    if (n != 0u)
+    {
+        p = off - v->base;
+        if (p <= c->nbytes && n <= c->nbytes - p)
+            mu_quill__read(q, c, p, n, (uint8_t*)dst);
+        else
+            (void)mu_quill_text(q, off, n, dst);
+    }
+
+    ++v->line;
+    ++v->local;
+    if (v->local >= ns)
+        (void)mu_quill__view_next_chunk(q, v);
+    return true;
+}
+
 #endif /* MU_QUILL_H */
