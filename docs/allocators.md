@@ -17,18 +17,35 @@ mu_align_up_u32(x, a)        mu_align_up_ptr(x, a)
 mu_is_pow2_u32(x)            mu_next_pow2_u32(x)   /* 0->1, 5->8, 16->16 */
 ```
 
-### `mu_arena` — linear bump allocator
+### `mu_arena` — linear bump allocator, two-ended
 
 ```c
-typedef struct { uint8_t* base; uint32_t capacity; uint32_t used; } mu_arena;
+typedef struct { uint8_t* base; uint32_t capacity; uint32_t used; uint32_t tail; } mu_arena;
 
-void* mu_arena_alloc(mu_arena* a, uint32_t size, uint32_t align);
-void  mu_arena_reset(mu_arena* a);
+void*    mu_arena_alloc(mu_arena* a, uint32_t size, uint32_t align);      /* front */
+void*    mu_arena_alloc_top(mu_arena* a, uint32_t size, uint32_t align);  /* back  */
+uint32_t mu_arena_top_mark(const mu_arena* a);          /* save the back cursor */
+void     mu_arena_top_rewind(mu_arena* a, uint32_t mark); /* drop everything above it */
+uint32_t mu_arena_available(const mu_arena* a);          /* free middle, in bytes */
+void     mu_arena_reset(mu_arena* a);                    /* both cursors to 0 */
 ```
 
 - Bump `used` upward with alignment; `NULL` when out of space.
 - No per-allocation free — reclaim with `mu_arena_reset`.
 - Perfect for per-frame, per-job, or load-phase scratch memory.
+- **Two cursors, not one.** `used` grows up from the front and `tail` counts
+  bytes reserved at the *end*; the invariant is `used + tail <= capacity`. A
+  temporary buffer taken with `mu_arena_alloc_top` therefore cannot move the
+  frame cursor or fragment what is already there — the classic "my scratch
+  buffer ate my frame arena" failure. `mu_arena_top_mark` /
+  `mu_arena_top_rewind` give you a nested scratchpad in two words.
+- There is no `mu_arena_init`; zero the struct and set `base`/`capacity`. A
+  garbage `tail` is not a safety problem (readers treat `tail > capacity` as
+  "no room at the back" and refuse) but it does make the arena look full.
+- The alignment gap above a top allocation (at most `align - 1` bytes) stays
+  reserved until the matching rewind; that is the price of tracking the back
+  with one counter. `perf_test/bench_allocators.c` measures the reversed cursor
+  at 2.128 ns/op against 2.126 ns for the forward one — nothing.
 
 ### `mu_pool` — fixed-size block pool
 
@@ -176,6 +193,26 @@ oa_debug_validate(&alloc);                    // DEBUG builds only
   allocation failure.
 - You allocate the backing memory yourself at the returned offsets; the
   allocator only tracks placement.
+
+#### Two things to know before you trust it
+
+- **The node budget is the budget that binds first.** Every split needs a
+  metadata node, so an arena with plenty of bytes can still refuse an
+  allocation because `max_allocs` ran out; an aligned request that has to skip
+  a leading gap needs *two*. `oa_storage_report` tells you the truth about the
+  bytes (it used to report 0 as soon as `free_offset` hit 0 — fixed, and the
+  case is now gate-locked in `perf_test/test_offset.c`).
+- **Alignment quality is not tracked.** `oa_allocate_aligned` returns the first
+  region it can align into, not the one whose start is already aligned. Making
+  the scan prefer the latter was implemented, measured, and does not pay — the
+  bins are size-indexed, so a bin's nodes differ by at most 12.5% and the
+  first fit is already the aligned one whenever one exists. The knob
+  (`OA_ALIGN_LOOKAHEAD`) defaults to 0 and exists so the experiment stays
+  reproducible: `perf_test/PERF_ALLOCATORS.md` §5, `make offset-ab`.
+- Naming note: this header is a port of Sebastian Aaltonen's OffsetAllocator
+  and keeps its `oa_*` symbols and `mu_offset_allocator.{h,c}` file name; the
+  rest of the library uses `mu_*` because the rule is "reference, not vendor".
+  Renaming this one is mechanical and not yet done.
 
 ### When to use which allocator
 

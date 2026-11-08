@@ -290,8 +290,45 @@ clean:
 	      test_math bench_math results_math.csv $(DS_TESTS) bench_intrusive bench_normals bench_wfc \
 	      test_shapes bench_shapes bench_shapes_vs_par test_easing bench_easing bench_easing_vs_par \
 	      test_roguelike bench_roguelike test_noise bench_noise test_allocators \
-      bench_allocators bench_allocators_big test_time bench_time
+      bench_allocators bench_allocators_big test_time bench_time \
+      test_offset test_offset_lookahead bench_offset bench_offset_ff bench_offset_la
+
+# ---- offset allocator (mu/mu_offset_allocator.{h,c}) ----------------------
+# The gate is built with -DDEBUG so oa_debug_validate() is live and the library
+# checks its own bins after every operation.
+
+offset-test: test_offset
+	./test_offset
+
+test_offset: test_offset.c ../mu/mu_offset_allocator.c ../mu/mu_offset_allocator.h
+	$(CC) $(CFLAGS) $(INCLUDES) -DDEBUG -o $@ test_offset.c ../mu/mu_offset_allocator.c
+
+# Same source, the *rejected* arm: the alignment lookahead that measured no
+# benefit and therefore ships off. It has to pass the same correctness gate,
+# which is the point -- the knob changes selection costs, not correctness -- and
+# the counters both arms print are the A/B evidence.
+offset-test-la: test_offset_lookahead
+	./test_offset_lookahead
+
+test_offset_lookahead: test_offset.c ../mu/mu_offset_allocator.c ../mu/mu_offset_allocator.h
+	$(CC) $(CFLAGS) $(INCLUDES) -DDEBUG -DOA_ALIGN_LOOKAHEAD=8u -o $@ test_offset.c ../mu/mu_offset_allocator.c
+
+offset-bench: bench_offset
+	./bench_offset --samples=31
+
+bench_offset: bench_offset.c ../mu/mu_offset_allocator.c ../mu/mu_offset_allocator.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -DOA_COUNT_STEPS -o $@ bench_offset.c ../mu/mu_offset_allocator.c -lm
+
+# Both arms of the alignment-lookahead experiment: one source, identical flags,
+# only the knob differs. Prints exact counts, so the comparison does not depend
+# on the clock.
+offset-ab:
+	$(CC) $(CFLAGS) $(INCLUDES) -DOA_COUNT_STEPS -DOA_ALIGN_LOOKAHEAD=0u -o bench_offset_ff bench_offset.c ../mu/mu_offset_allocator.c -lm
+	$(CC) $(CFLAGS) $(INCLUDES) -DOA_COUNT_STEPS -DOA_ALIGN_LOOKAHEAD=8u -o bench_offset_la bench_offset.c ../mu/mu_offset_allocator.c -lm
+	./bench_offset_ff --counters
+	./bench_offset_la --counters
 
 .PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals \
+        offset-test offset-test-la offset-bench offset-ab \
         shapes-test shapes-bench shapes-par easing-test easing-bench easing-par \
         headers-test noise-test noise-bench alloc-test alloc-bench alloc-bench-big clean

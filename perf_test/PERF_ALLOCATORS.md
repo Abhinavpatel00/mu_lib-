@@ -1,6 +1,6 @@
 # `mu_allocators.h` performance — the arena fast path, and where the buddy's O(1) unlink actually pays
 
-`perf_test/bench_allocators.c` (`make -C perf_test alloc-bench`), 9 rows in one
+`perf_test/bench_allocators.c` (`make -C perf_test alloc-bench`), 10 rows in one
 binary, 21 samples each, pinned to one core.
 
 Two things are worth reading here. The first is boring and should be the
@@ -30,6 +30,7 @@ once the freelist gets long and the free order stops matching the park order.
 | row | median | min | CV | CI99 | what one iteration is |
 | --- | --- | --- | --- | --- | --- |
 | `arena.bump32` | **1.985 ns** | 1.857 | 23.2% | ±14.9% | one `mu_arena_alloc(32, 8)`, cursor wrapped when full |
+| `arena.top32` | **2.128 ns** | 2.095 | 0.8% | ±0.5% | one `mu_arena_alloc_top(32, 8)` — same bump from the far end, added with the back cursor (§6 of `docs/easy_memory.md`) |
 | `pool.alloc_free` | **6.274 ns** | 6.028 | 5.4% | ±3.5% | alloc + free pair (a full churn cycle) |
 | `pool.free` | **2.358 ns** | 1.709 | 13.1% | ±8.4% | one `mu_pool_free` of a pre-filled pool |
 | `buddy.alloc_lazy` | **45.21 ns** | 41.34 | 22.6% | ±14.5% | one `mu_buddy_alloc(32)` out of an empty arena — the pure split-down path, 17 levels |
@@ -120,6 +121,84 @@ the next-pointer lives *in the free block itself*, so a pop is one line of
 already-touched arena memory. The buddy buys arbitrary sizes, alignment and
 coalescing with 2 MiB of side tables, and this table prices that.
 
+## 5. The offset allocator: a gate, a bug, and a negative result
+
+`mu/mu_offset_allocator.{h,c}` -- Aaltonen's two-level bin scheme, ~660 lines,
+in the tree since before the gate policy -- had **no test and no benchmark**.
+It now has both, and they were worth writing: the gate found a reporting bug on
+its first run, and the benchmark settled an easy_memory idea in one afternoon.
+
+### 5.1 The gate found a bug in the first minute
+
+`oa_storage_report()` returned `total_free_space = 0` for an arena with free
+bytes in it, because the whole function was gated on `free_offset > 0` and
+`free_offset` is the *metadata* budget, not the storage. Fill a 64 KiB arena
+with 64-byte blocks under a 1024-node budget and it stops at 1022 blocks with
+128 bytes free -- and the report said 0 free, 0 largest. One-line fix (read the
+storage fields; nothing in the body depends on `free_offset`), one gate case
+("leftover bytes are still reported when the nodes run out"), and the same
+workload is what shows *why* the node budget matters: it binds 128 bytes before
+the byte budget does.
+
+### 5.2 The A/B that said no
+
+`easy_memory`'s alignment-quality idea -- prefer a free block whose address is
+already aligned over one that needs a leading skip -- is a good idea in a
+general heap. `OA_ALIGN_LOOKAHEAD=N` implements it in the aligned scan: keep the
+first fit in hand, walk up to N more nodes *in the same bin*, take an
+already-aligned one if it shows up. `make offset-ab` builds the same source
+twice, once at 0 and once at 8, and prints exact counts.
+
+Six fragmenting workloads (40 holes in one bin, holes 96..103 bytes, requests
+96 bytes; the `walking` rows move the hole offsets across the alignment grid):
+
+| workload | align | nodes @0 | nodes @8 | visits @0 | visits @8 | bytes (both) |
+|---|---|---|---|---|---|---|
+| uniform holes | 64 | 160 | 160 | 1600 | 1600 | 61 696 |
+| uniform holes | 32 | 81 | 81 | 40 | 40 | 61 696 |
+| uniform holes | 16 | 81 | 81 | 40 | 40 | 61 696 |
+| walking holes | 64 | 160 | 160 | 1481 | 1521 | 61 696 |
+| walking holes | 32 | 124 | 124 | 1281 | **1374** | 61 696 |
+| walking holes | 16 | 126 | 126 | 948 | **1114** | 61 696 |
+
+Every region granted is the same region, the node count is the same, the free
+storage is the same, and the lookahead only visits 2.7-17.5 % more nodes. The
+`zero-gap` counter explains it: in the `walking align32` row, **35 of 40**
+requests already landed on an aligned region under plain first-fit, because
+freed regions are pushed to the bin head and an aligned region that is freed
+keeps its alignment. Where the counter is 0 (align 64 against holes that are
+never 64-aligned) no amount of walking can conjure an aligned node.
+
+So the knob ships at **0**. It is kept, with the counters, so the experiment is
+reproducible rather than a claim -- the same reason the `_scan` baselines in §2
+are kept.
+
+### 5.3 Per-operation cost (shipped configuration, 31 samples)
+
+| row | median | min | CV |
+|---|---|---|---|
+| `offset.alloc_free` -- `oa_allocate(64)` + `oa_free` | 41.4 ns | 39.9 | 22.4 % |
+| `offset.aligned_exact` -- aligned alloc that needs no split | 33.5 ns | 24.0 | 15.1 % |
+| `offset.aligned_gap` -- aligned alloc that skips a 56-byte gap | 33.8 ns | 25.7 | 12.5 % |
+| `offset.free_merge` -- alloc 32 + free into a live neighbour | 43.5 ns | 36.4 | 20.6 % |
+
+Each row is an alloc/free pair, so halve them for a per-operation figure of
+merit. `aligned_gap` costing the same as `aligned_exact` is the interesting
+one: parking a 56-byte scrap node and splitting off a remainder is two extra
+bin inserts and it does not show up at this resolution. All four rows are
+CV 12-22 % and `mu_bench` flags them unstable -- these are sizes, not ratios,
+and nothing in 5.2 depends on them.
+
+### 5.4 What this does not show
+
+* Whether the offset allocator is fast *compared to anything*. There is no
+  baseline here; §1-§3 cover our own arena/pool/buddy, and this section covers
+  one library-internal question.
+* Anything about 16-bit node indices (`USE_16_BIT_NODE_INDICES`): the gate and
+  the bench are built with the default 32-bit `OA_NodeIndex`.
+* Anything about a *multi-threaded* caller: `OA_Allocator` has no lock and the
+  gate is single-threaded.
+
 ## 4. What this does not show
 
 * **No cross-library claim.** There is no baseline allocator here that is not
@@ -146,6 +225,12 @@ coalescing with 2 MiB of side tables, and this table prices that.
 make -C perf_test alloc-bench        # 9 rows, 21 samples, taskset -c 0
 make -C perf_test alloc-bench-big    # the same source at CHUNK=1024
 make -C perf_test alloc-test         # the gate, incl. the unlink-vs-scan equivalence
+make -C perf_test offset-test        # offset allocator gate (-DDEBUG, so the
+make -C perf_test offset-test-la     # library validates itself after every op):
+                                     # the second target is the rejected
+                                     # lookahead arm, gated the same way
+make -C perf_test offset-bench       # 4 rows, 31 samples
+make -C perf_test offset-ab          # the lookahead A/B, exact counters
 ```
 
 The frequency probe used for field 3 was a 100M-iteration dependent `add` chain

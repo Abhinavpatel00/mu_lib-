@@ -40,14 +40,36 @@ MU_INLINE uint32_t mu_next_pow2_u32(uint32_t x) {
 
 /* ----------- Linear Arena (bump) ----------- */
 
+/* Two cursors, not one. `used` grows up from the front, `tail` counts bytes
+ * reserved at the back, and the invariant is simply `used + tail <= capacity`:
+ * the middle window is free and either side may claim from it.
+ *
+ * FIELD ORDER MATTERS FOR INITIALISATION: there is no mu_arena_init, so a
+ * mu_arena is brought to life by zeroing it and setting base/capacity. `tail`
+ * being garbage is not a memory-safety hazard (every reader treats
+ * `tail > capacity` as "no room at the back" and refuses) but it does make the
+ * arena look full, so zero-initialise: `mu_arena a = {0}; a.base = buf;
+ * a.capacity = n;` */
 typedef struct mu_arena {
 	uint8_t* base;
 	uint32_t capacity;
 	uint32_t used;
+	uint32_t tail; /* bytes reserved at the END of the buffer */
 } mu_arena;
 
 void* mu_arena_alloc(mu_arena* a, uint32_t size, uint32_t align);
 void  mu_arena_reset(mu_arena* a);
+
+/* Scratchpad at the far end. mu_arena_alloc_top carves downward from
+ * base + capacity - tail, so a temporary buffer taken here cannot push the
+ * long-lived frame upward or fragment it: the two sides only ever meet in the
+ * middle, and the tail side can be unwound on its own. Same power-of-two
+ * `align` contract as mu_arena_alloc, measured from `base` like everything
+ * else in this file. */
+void*    mu_arena_alloc_top(mu_arena* a, uint32_t size, uint32_t align);
+uint32_t mu_arena_top_mark(const mu_arena* a);           /* save the tail cursor  */
+void     mu_arena_top_rewind(mu_arena* a, uint32_t mark); /* drop everything above it */
+uint32_t mu_arena_available(const mu_arena* a);           /* free middle, in bytes */
 
 /* ----------- Fixed Block Pool ----------- */
 
@@ -106,9 +128,11 @@ void  mu_buddy_free(mu_buddy* b, void* ptr);
  * up to 16 on the usual ABIs; over-align the buffer for more). */
 void* mu_arena_alloc(mu_arena* a, uint32_t size, uint32_t align) {
 	if (!a || !a->base || size == 0u) return NULL;
+	if (a->tail > a->capacity) return NULL; /* fail closed: never alias the tail */
 	if (align == 0u) align = 1u;
 	uint32_t p = mu_align_up_u32(a->used, align);
-	if (p + size > a->capacity) return NULL;
+	uint32_t limit = a->capacity - a->tail;
+	if (p > limit || size > limit - p) return NULL;
 	a->used = p + size;
 	return a->base + p;
 }
@@ -116,6 +140,43 @@ void* mu_arena_alloc(mu_arena* a, uint32_t size, uint32_t align) {
 void mu_arena_reset(mu_arena* a) {
 	if (!a) return;
 	a->used = 0u;
+	a->tail = 0u;
+}
+
+/* Carve from the back. `tail` is a contiguous reservation at the end of the
+ * buffer, so the top side is a stack: base + capacity - tail is the lowest
+ * address handed out from the back, everything above it is reserved.
+ *
+ * The alignment gap below the returned block (at most align-1 bytes, between
+ * the block's start and the previous reservation edge) stays reserved until the
+ * matching rewind. That is the price of tracking the back with one counter; the
+ * price of not tracking it at all is that a temporary buffer pushes the frame
+ * cursor up and the long-lived allocations above it are gone for good. */
+void* mu_arena_alloc_top(mu_arena* a, uint32_t size, uint32_t align) {
+	if (!a || !a->base || size == 0u) return NULL;
+	if (a->tail > a->capacity) return NULL;
+	if (align == 0u) align = 1u;
+	uint32_t end = a->capacity - a->tail;
+	if (end < a->used) return NULL;
+	if (size > end - a->used) return NULL;
+	uint32_t start = (end - size) & ~(align - 1u);
+	if (start < a->used) return NULL; /* the alignment gap crossed the bottom cursor */
+	a->tail = a->capacity - start;
+	return a->base + start;
+}
+
+uint32_t mu_arena_top_mark(const mu_arena* a) {
+	return a ? a->tail : 0u;
+}
+
+void mu_arena_top_rewind(mu_arena* a, uint32_t mark) {
+	if (!a || mark > a->capacity) return; /* refuse a bogus mark, keep the arena valid */
+	a->tail = mark;
+}
+
+uint32_t mu_arena_available(const mu_arena* a) {
+	if (!a || a->tail > a->capacity || a->used > a->capacity - a->tail) return 0u;
+	return a->capacity - a->tail - a->used;
 }
 
 /* ----------- Fixed Block Pool ----------- */

@@ -27,7 +27,7 @@ Subsystems ship as their own single headers:
 #include "mu/mu_bench.h"             /* benchmark harness (one TU per binary)     */
 #include "mu/mu_shapes.h"            /* parametric shapes, SDF bake, L-systems    */
 #include "mu/mu_easing.h"            /* 33 curves, derivatives, Bezier, LUT       */
-#include "mu/mu_time.h"             /* steady clock, calendar, ISO 8601, durations   */
+#include "mu/mu_time.h"             /* steady clock, calendar, ISO 8601, durations  */
 ```
 
 ## Documentation index
@@ -46,7 +46,7 @@ Subsystems ship as their own single headers:
 | [normals.md](normals.md) | `mu_mat3_cofactor` / `mu_mat4_normal`: cofactor instead of inverse-transpose (2.9x, and correct under reflection) |
 | [debug-break.md](debug-break.md) | `mu/mu_debug_break.h`: portable software breakpoint / `MU_DEBUG_BREAK()` |
 | [allocators.md](allocators.md) | `mu/allocators.h` arena/pool/buddy, `mu/offset_allocator.h`, `mu/mu_mmgr.h` |
-| [easy_memory.md](easy_memory.md) | gap analysis vs [EasyMem/easy_memory](https://github.com/EasyMem/easy_memory): what we lack (alignment-gap recycling, alignment-quality tie-break, tail scratchpad), what we decline (per-block 32 B header, LLRB), and the fragmentation numbers (73.9% vs 68.5% payload density) |
+| [easy_memory.md](easy_memory.md) | gap analysis vs [EasyMem/easy_memory](https://github.com/EasyMem/easy_memory): the three gaps and what happened to each — tail scratchpad shipped (`mu_arena_alloc_top`, 2.128 vs 2.126 ns), alignment-quality tie-break measured and shipped *off* (identical grants, 2.7–17.5% more visits), per-block 32 B header and LLRB declined; fragmentation numbers (73.9% vs 68.5% payload density) |
 | [containers.md](containers.md) | `array`, `mu_span`, `mu_string_arena`, `mu_pool_link`/lists/freelists, `mu/mu_min_containers.h` |
 | [sets-and-ids.md](sets-and-ids.md) | `mu_bitset`, `mu_sparse_set`, `mu_bulk_storage`, `mu_id_pool`, hash tables (`mu_hash32`, `mu_hash64`, `mu_phf`), `mu_multi_index`, `mu_chunked_u32_array` |
 | [worklist.md](worklist.md) | `mu_worklist`: unique double-ended work queue |

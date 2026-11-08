@@ -4,6 +4,10 @@
  * the same flags and read by the same clock:
  *
  *   arena.bump32            mu_arena_alloc(32, 8) into a fresh cursor
+ *   arena.top32             mu_arena_alloc_top(32, 8): the same bump from the
+ *                           far end. Should equal bump32 -- the reversed cursor
+ *                           costs an extra subtraction and a compare, nothing
+ *                           else -- and if it ever does not, that is the finding.
  *   pool.alloc_free         mu_pool_alloc + mu_pool_free, the churn pair
  *   pool.free               mu_pool_free of a pre-filled pool, one per op
  *   buddy.alloc_lazy         mu_buddy_alloc(32) from an empty arena (split path)
@@ -186,6 +190,16 @@ MU_BENCH(arena, bump32)
 	{
 		if (g_a.used + 32u > g_a.capacity) g_a.used = 0u;   /* wrap: rare */
 		g_sink += (uint32_t)(uintptr_t)mu_arena_alloc(&g_a, 32u, 8u);
+	}
+}
+
+MU_BENCH(arena, top32)
+{
+	uint32_t i;
+	MU_BENCH_ITERATE(i)
+	{
+		if (g_a.tail + 32u > g_a.capacity) mu_arena_reset(&g_a);
+		g_sink += (uint32_t)(uintptr_t)mu_arena_alloc_top(&g_a, 32u, 8u);
 	}
 }
 

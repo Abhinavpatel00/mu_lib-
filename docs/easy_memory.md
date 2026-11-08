@@ -77,22 +77,34 @@ rounding makes every hole reusable by anything up to its block size. A 24-byte
 `em_alloc` carries a 32-byte header — **100% overhead on that request**
 (`sz.c`: `sizeof(Block) = 32`, 4 machine words), which is exactly the 5.4 pp.
 
-## 3. What is worth adopting
+## 3. What is worth adopting — and what happened when we did
 
-1. **Alignment-gap recycling** (real gap, small change). In `mu_buddy` the
-   padding before an aligned block is dead until the block is freed; in
-   `mu_offset_allocator` it is handled per size class but not returned to a
-   general free list. Splitting the ≥ `MU_MIN_GAP` skipped run and pushing it
-   back is ~25 lines and a gate case (allocate aligned, then check the gap is
-   allocatable at its own size).
-2. **Alignment quality as a free-block key** (the genuinely good idea). Before
-   splitting a fresh block to satisfy an alignment, prefer a free block whose
-   address already satisfies it. In `mu_buddy` this is free (levels are aligned
-   by construction); in `mu_offset_allocator` it is not, and that allocator is
-   where it would pay.
-3. **Tail scratchpad** for `mu_arena`: one `size_t` at the end, `mu_arena_alloc_top`,
-   reset restores both cursors. O(1), no metadata, and it removes the classic
-   "my temporary buffer fragmented my frame arena" failure.
+1. **Alignment-gap recycling.** *Taken, with a correction to the premise.*
+   The premise above was half wrong: in `mu_buddy` there is no padding before
+   an aligned block to recycle — alignment is satisfied by rounding the *block
+   size* up (which is the whole cost, and unavoidable: a 32-byte block at
+   offset 32k cannot hold a 64-aligned pointer). In `mu_offset_allocator` the
+   leading gap was already returned to the free list as its own node. What was
+   real is the *arena* gap: `mu_arena_alloc` aligns the offset upward and the
+   skipped bytes are lost. That is now the back cursor — `mu_arena_alloc_top`,
+   `mu_arena_top_mark`, `mu_arena_top_rewind` — and the reversed bump measures
+   **2.128 ns/op against 2.126 ns** for the forward one
+   (`bench_allocators.c`, row `arena.top32`).
+2. **Alignment quality as a free-block key.** *Taken, measured, does not pay,
+   shipped off.* Implemented as `OA_ALIGN_LOOKAHEAD` in
+   `mu/mu_offset_allocator.c`: after a fit that would waste a leading gap,
+   keep walking the same bin for a region that is already aligned. Six
+   fragmenting workloads, both arms, exact counters: **identical** regions
+   granted, **identical** node counts, **identical** free storage — the only
+   difference is 2.7–17.5 % more nodes visited. The reason is structural:
+   bins are size-indexed, so a bin's nodes differ by at most 12.5 %, and where
+   an aligned node exists the first fit already reaches it (35 of 40 requests
+   in the `walking align32` workload). The knob defaults to 0 and stays so the
+   experiment is reproducible: `perf_test/PERF_ALLOCATORS.md` §5.
+3. **Tail scratchpad** for `mu_arena`: *taken* — see 1. `uint32_t tail`, four
+   functions, `mu_arena_reset` restores both cursors, ~30 checks in
+   `perf_test/test_allocators.c` including the "middle refuses to alias the
+   tail reservation" case.
 
 ## 4. What we are deliberately not taking
 

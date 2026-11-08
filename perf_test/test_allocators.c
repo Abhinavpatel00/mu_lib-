@@ -43,7 +43,7 @@ static void test_arena(void)
     static uint8_t raw[256 + 64];
     uint8_t *mem = raw + ((64u - ((uintptr_t)raw % 64u)) % 64u);
     mu_arena a;
-    a.base = mem; a.capacity = 256u; a.used = 0u;
+    a.base = mem; a.capacity = 256u; a.used = 0u; a.tail = 0u;
     void *p, *q, *r;
 
     p = mu_arena_alloc(&a, 10u, 8u);
@@ -60,10 +60,92 @@ static void test_arena(void)
 
     mu_arena_reset(&a);
     check_u32(a.used, 0u, "arena: reset rewinds");
+    check_u32(a.tail, 0u, "arena: reset also rewinds the tail cursor");
     check(mu_arena_alloc(&a, 10u, 8u) == mem, "arena: reuse after reset");
 
     check(mu_arena_alloc(NULL, 1u, 1u) == NULL, "arena: NULL arena");
     check(mu_arena_alloc(&a, 0u, 1u) == NULL, "arena: size 0 refused");
+}
+
+/* Two-ended arena: temporary buffers from the top must not move the frame
+ * cursor, and must be reclaimable without unwinding the middle. */
+static void test_arena_top(void)
+{
+    static uint8_t raw[1024 + 256];
+    uint8_t *mem = raw + ((256u - ((uintptr_t)raw % 256u)) % 256u);
+    mu_arena a = {0};
+    void *frame, *tmp, *deep;
+    uint32_t mark;
+
+    a.base = mem; a.capacity = 1024u;
+    check_u32(mu_arena_available(&a), 1024u, "arena top: whole buffer free");
+
+    frame = mu_arena_alloc(&a, 100u, 8u);
+    check(frame == mem, "arena top: frame allocation still starts at base");
+    check_u32(mu_arena_available(&a), 924u, "arena top: available after frame");
+
+    mark = mu_arena_top_mark(&a);
+    check_u32(mark, 0u, "arena top: fresh mark is zero");
+
+    tmp = mu_arena_alloc_top(&a, 64u, 64u);
+    check(tmp == mem + 960u, "arena top: first top block ends at capacity");
+    check(tmp && ((uintptr_t)tmp % 64u) == 0u, "arena top: 64-byte alignment honoured");
+    check_u32(a.tail, 64u, "arena top: tail records the reservation");
+    check_u32(a.used, 100u, "arena top: top allocation leaves the frame cursor alone");
+    check_u32(mu_arena_available(&a), 860u, "arena top: available shrinks by the block");
+
+    /* A second, differently aligned block: the gap it skips stays reserved but
+     * the frame cursor still has not moved, and both blocks are reachable. */
+    deep = mu_arena_alloc_top(&a, 8u, 256u);
+    check(deep == mem + 768u, "arena top: over-aligned block lands on the 256-byte edge");
+    check(deep && ((uintptr_t)deep % 256u) == 0u, "arena top: 256-byte alignment honoured");
+    check((uint8_t *)deep + 8u <= (uint8_t *)tmp, "arena top: blocks do not overlap");
+    check_u32(a.used, 100u, "arena top: frame cursor still untouched");
+
+    /* The middle may not grow into either reservation. Probe a copy so the real
+     * arena keeps its cursors. */
+    {
+        mu_arena probe = a;
+        check(mu_arena_alloc(&probe, mu_arena_available(&probe) + 1u, 1u) == NULL,
+              "arena top: middle refuses to alias the tail reservation");
+        check(mu_arena_alloc(&probe, mu_arena_available(&probe), 1u) != NULL,
+              "arena top: middle takes exactly the window that is left");
+        check_u32(probe.used, 768u, "arena top: middle stops at the reserved edge");
+    }
+
+    mu_arena_top_rewind(&a, mark);
+    check_u32(a.tail, 0u, "arena top: rewind drops every top allocation at once");
+    check_u32(mu_arena_available(&a), 924u, "arena top: rewind gives the back of the buffer back");
+    check(mu_arena_alloc_top(&a, 924u, 1u) == mem + 100u,
+          "arena top: after rewind the whole back is usable again");
+
+    /* Nested marks: rewind to the inner one keeps the outer block. */
+    mu_arena_reset(&a);
+    tmp = mu_arena_alloc_top(&a, 32u, 8u);
+    check_u32(a.tail, 32u, "arena top: outer block reserved");
+    mark = mu_arena_top_mark(&a);
+    deep = mu_arena_alloc_top(&a, 32u, 8u);
+    check(deep == (uint8_t *)tmp - 32u, "arena top: inner block sits just below the outer");
+    mu_arena_top_rewind(&a, mark);
+    check_u32(a.tail, 32u, "arena top: rewind to the inner mark keeps the outer block");
+
+    /* Refusals never move a cursor. */
+    check(mu_arena_alloc_top(&a, 4096u, 1u) == NULL, "arena top: oversized request refused");
+    check(mu_arena_alloc_top(NULL, 8u, 1u) == NULL, "arena top: NULL arena");
+    check(mu_arena_alloc_top(&a, 0u, 1u) == NULL, "arena top: size 0 refused");
+    check_u32(a.tail, 32u, "arena top: refusals do not consume tail space");
+    check_u32(a.used, 0u, "arena top: refusals do not consume frame space");
+
+    /* A garbage cursor is refused, not followed. A *small* garbage tail only
+     * clips the window (which is why the struct comment demands zeroing); a tail
+     * past capacity must make both sides refuse rather than alias. */
+    a.tail = 1025u;
+    check(mu_arena_alloc(&a, 1u, 1u) == NULL, "arena top: tail > capacity refuses at the front");
+    check(mu_arena_alloc_top(&a, 1u, 1u) == NULL, "arena top: tail > capacity refuses at the back");
+    check_u32(mu_arena_available(&a), 0u, "arena top: tail > capacity reports nothing available");
+    mu_arena_top_rewind(&a, 4096u);
+    check_u32(a.tail, 1025u, "arena top: a bogus rewind mark is refused");
+    a.tail = 0u;
 }
 
 /* ------------------------------------------------------------------ */
@@ -387,6 +469,7 @@ int main(void)
     printf("mu allocators correctness gate (arena / pool / buddy)\n");
     printf("----------------------------------------------------------\n");
     test_arena();
+    test_arena_top();
     test_pool();
     test_buddy_capacity();
     test_buddy_free_all_then_refill();

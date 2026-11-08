@@ -15,6 +15,42 @@
 #include <stdio.h>
 #endif
 
+/* ---- alignment lookahead -------------------------------------------------
+ * First-fit in an aligned allocation has a hidden cost: a free region that
+ * starts at an unaligned address is split into leading scrap + block, and the
+ * scrap is a node that no later request of the same class can merge back into
+ * anything useful. Its natural consumers are the *node budget* (max_allocs)
+ * and the space itself, so a fragmented heap runs out of metadata before it
+ * runs out of bytes.
+ *
+ * The scan below therefore does not stop at the first fit: it remembers that
+ * fit and keeps walking the same bin, looking for a region that is *already*
+ * aligned (lead == 0, which costs no leading node at all). If one shows up
+ * within OA_ALIGN_LOOKAHEAD extra nodes it is taken; otherwise the remembered
+ * first fit is used, so the worst case is unchanged in memory and bounded in
+ * time (it never leaves the bin it was already in).
+ *
+ * MEASURED, AND IT DOES NOT PAY -- so the default is 0 and the code below is
+ * the instrument, not the policy. Six fragmenting workloads (perf_test/
+ * bench_offset.c --counters, both arms, exact counters): every single
+ * allocation was granted the same region, the node count and the free storage
+ * were identical, and the lookahead only walked 2.7-17.5% more nodes. The reason is
+ * structural: bins are indexed by size, so a bin's nodes differ by at most
+ * 12.5% in size, and a request that fits one of them either has a zero-gap
+ * candidate near the head already (first fit takes it) or has none anywhere
+ * (walking cannot invent one). Alignment quality is worth indexing when the
+ * structures mix size classes -- it is not worth a second walk in a scheme
+ * whose whole point is that a bin holds one size class. */
+#ifdef OA_COUNT_STEPS
+oa_uint64 oa_stat_scan_steps;
+oa_uint64 oa_stat_aligned_calls;
+oa_uint64 oa_stat_zero_gap_fits;
+oa_uint64 oa_stat_gap_fits;
+#define OA_ALIGN_STEP() (oa_stat_scan_steps++)
+#else
+#define OA_ALIGN_STEP() ((void)0)
+#endif
+
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -387,6 +423,11 @@ OA_Allocation oa_allocate_aligned(OA_Allocator* allocator, oa_uint32 size, oa_ui
 
     OA_ASSERT((alignment & (alignment - 1u)) == 0);
 
+#ifdef OA_COUNT_STEPS
+    oa_stat_aligned_calls++;
+#endif
+
+
     oa_uint32 minBinIndex = oa_uint_to_float_round_up(size);
     oa_uint32 minTopBinIndex = minBinIndex >> OA_TOP_BINS_INDEX_SHIFT;
     oa_uint32 minLeafBinIndex = minBinIndex & OA_LEAF_BINS_INDEX_MASK;
@@ -395,6 +436,13 @@ OA_Allocation oa_allocate_aligned(OA_Allocator* allocator, oa_uint32 size, oa_ui
     oa_uint32 alignedOffset = 0;
     oa_uint32 leadingSize = 0;
     oa_uint32 trailingSize = 0;
+
+    /* The best fit seen so far that costs a leading scrap node. Taken only if
+     * no zero-gap fit turns up inside the lookahead budget. */
+    oa_uint32 gapNodeIndex = OA_NODE_UNUSED;
+    oa_uint32 gapAlignedOffset = 0;
+    oa_uint32 gapLeadingSize = 0;
+    oa_uint32 gapTrailingSize = 0;
 
     for(oa_uint32 topBinIndex = minTopBinIndex; topBinIndex < OA_NUM_TOP_BINS; topBinIndex++)
     {
@@ -410,12 +458,16 @@ OA_Allocation oa_allocate_aligned(OA_Allocator* allocator, oa_uint32 size, oa_ui
         {
             oa_uint32 binIndex = (topBinIndex << OA_TOP_BINS_INDEX_SHIFT) | leafBinIndex;
             oa_uint32 nodeIndex = allocator->bin_indices[binIndex];
+            int looked = 0; /* signed: `>= 0` must stay meaningful for the 0 knob */
+
             while(nodeIndex != OA_NODE_UNUSED)
             {
                 OA_Node* node = &allocator->nodes[nodeIndex];
                 oa_uint32 nodeStart = node->data_offset;
                 oa_uint32 nodeEnd = node->data_offset + node->data_size;
                 oa_uint32 aligned = oa_align_up(nodeStart, alignment);
+
+                OA_ALIGN_STEP();
 
                 if(aligned + size <= nodeEnd)
                 {
@@ -426,15 +478,53 @@ OA_Allocation oa_allocate_aligned(OA_Allocator* allocator, oa_uint32 size, oa_ui
 
                     if(neededNodes <= availableNodes)
                     {
-                        selectedNodeIndex = nodeIndex;
-                        alignedOffset = aligned;
-                        leadingSize = lead;
-                        trailingSize = trail;
-                        goto oa_aligned_found;
+                        if(lead == 0u)
+                        {
+#ifdef OA_COUNT_STEPS
+                            oa_stat_zero_gap_fits++;
+#endif
+                            /* Already aligned: no scrap node, take it now. */
+                            selectedNodeIndex = nodeIndex;
+                            alignedOffset = aligned;
+                            leadingSize = lead;
+                            trailingSize = trail;
+                            goto oa_aligned_found;
+                        }
+
+#ifdef OA_COUNT_STEPS
+                        oa_stat_gap_fits++;
+#endif
+                        if(gapNodeIndex == OA_NODE_UNUSED)
+                        {
+                            gapNodeIndex = nodeIndex;
+                            gapAlignedOffset = aligned;
+                            gapLeadingSize = lead;
+                            gapTrailingSize = trail;
+                        }
+
+                        /* Budget spent on this bin: settle for the first fit
+                         * rather than pay more to search a worse bin later. */
+                        if(++looked >= (int)OA_ALIGN_LOOKAHEAD)
+                        {
+                            selectedNodeIndex = gapNodeIndex;
+                            alignedOffset = gapAlignedOffset;
+                            leadingSize = gapLeadingSize;
+                            trailingSize = gapTrailingSize;
+                            goto oa_aligned_found;
+                        }
                     }
                 }
 
                 nodeIndex = node->bin_list_next;
+            }
+
+            if(gapNodeIndex != OA_NODE_UNUSED)
+            {
+                selectedNodeIndex = gapNodeIndex;
+                alignedOffset = gapAlignedOffset;
+                leadingSize = gapLeadingSize;
+                trailingSize = gapTrailingSize;
+                goto oa_aligned_found;
             }
 
             leafBinIndex = oa_find_lowest_set_bit_after(leafMask, leafBinIndex + 1u);
@@ -570,7 +660,13 @@ OA_StorageReport oa_storage_report(const OA_Allocator* allocator)
     oa_uint32 largestFreeRegion = 0;
     oa_uint32 freeStorage = 0;
 
-    if(allocator && allocator->free_offset > 0)
+    /* `free_offset > 0` used to be part of this condition, which conflated two
+     * different questions: "is there a metadata node left to split with" and
+     * "is there any free storage". An arena that has run out of *nodes* still
+     * holds its free bytes -- the gate measures exactly that case (1022 of 1024
+     * blocks allocated, 128 bytes free, report claiming 0) -- so the report
+     * reads the storage fields only. Nothing below depends on free_offset. */
+    if(allocator)
     {
         freeStorage = allocator->free_storage;
         if(allocator->used_bins_top)

@@ -14,9 +14,23 @@ extern "C" {
 // Configuration
 // #define USE_16_BIT_NODE_INDICES
 
+/* Alignment lookahead (implemented in mu_offset_allocator.c). 0 = plain
+ * first-fit; N = after finding a fit that wastes a leading scrap node, inspect
+ * up to N more nodes in the same bin for one that is already aligned.
+ *
+ * DEFAULT 0 BECAUSE IT WAS MEASURED AND IT DID NOT PAY: six fragmenting
+ * workloads, both arms, exact counters (PERF_ALLOCATORS.md section 5) -- the
+ * set of allocations granted, the node count and the free storage came out
+ * identical, and the only observable difference was 2.7-17.5% more nodes visited.
+ * The knob stays so the experiment is reproducible rather than a claim. */
+#ifndef OA_ALIGN_LOOKAHEAD
+#define OA_ALIGN_LOOKAHEAD 0u
+#endif
+
 typedef uint8_t  oa_uint8;
 typedef uint16_t oa_uint16;
 typedef uint32_t oa_uint32;
+typedef unsigned long long oa_uint64;
 
 #ifdef USE_16_BIT_NODE_INDICES
 typedef oa_uint16 OA_NodeIndex;
@@ -82,6 +96,16 @@ typedef struct OA_Allocator
     OA_NodeIndex* free_nodes;
     oa_uint32    free_offset;
 } OA_Allocator;
+
+/* Compile the implementation with -DOA_COUNT_STEPS to fill these in. They are
+ * only there to make perf_test/bench_offset.c report exact work counts; the
+ * default build has no counters and no branches for them. */
+#ifdef OA_COUNT_STEPS
+extern oa_uint64 oa_stat_scan_steps;
+extern oa_uint64 oa_stat_aligned_calls;
+extern oa_uint64 oa_stat_zero_gap_fits;
+extern oa_uint64 oa_stat_gap_fits;
+#endif
 
 void oa_init(OA_Allocator* allocator, oa_uint32 size, oa_uint32 max_allocs);
 void oa_destroy(OA_Allocator* allocator);
