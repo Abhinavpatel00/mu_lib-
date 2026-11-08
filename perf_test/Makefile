@@ -239,12 +239,27 @@ alloc-test: test_allocators
 test_allocators: test_allocators.c ../mu/allocators.h
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_allocators.c
 
+# Wants >=21 samples on one pinned core: not part of run-proofs. Rows are in one
+# binary so the O(1)-unlink / O(n)-scan pair is compiled identically.
+#   make -C perf_test alloc-bench
+#   make -C perf_test alloc-bench-big     # same source, 1024-entry freelists
+alloc-bench: bench_allocators
+	taskset -c 0 ./bench_allocators --samples=21
+
+bench_allocators: bench_allocators.c ../mu/allocators.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_allocators.c -lm
+
+alloc-bench-big: bench_allocators.c ../mu/allocators.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) -DCHUNK=1024u $(INCLUDES) -o bench_allocators_big bench_allocators.c -lm
+	taskset -c 0 ./bench_allocators_big --filter=mergeburst --samples=21
+
 clean:
 	rm -f $(ORIG_TARGETS) $(ST_PROOFS) $(MT_PROOFS) card_asm_dump.s \
 	      test_math bench_math results_math.csv $(DS_TESTS) bench_intrusive bench_normals bench_wfc \
 	      test_shapes bench_shapes bench_shapes_vs_par test_easing bench_easing bench_easing_vs_par \
-	      test_roguelike bench_roguelike test_noise bench_noise test_allocators
+	      test_roguelike bench_roguelike test_noise bench_noise test_allocators \
+      bench_allocators bench_allocators_big
 
 .PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals \
         shapes-test shapes-bench shapes-par easing-test easing-bench easing-par \
-        headers-test noise-test noise-bench alloc-test clean
+        headers-test noise-test noise-bench alloc-test alloc-bench alloc-bench-big clean

@@ -270,6 +270,117 @@ static void test_buddy_alignment_and_free_known(void)
     check(mu_buddy_alloc(&g_b, 0u, 1u) == NULL, "buddy: size 0 refused");
 }
 
+/* ------------------------------------------------------------------ */
+/* Buddy: the O(1) unlink and the O(n) sibling scan must agree         */
+/* ------------------------------------------------------------------ */
+
+/* perf_test/bench_allocators.c keeps a `_scan` baseline -- the same merge, but
+ * the sibling is found by walking the level's freelist instead of unlinking it
+ * through free_prev. That baseline is only honest if it reaches the *same*
+ * allocator state; otherwise the timing compares two different algorithms. So
+ * run one fragmented burst both ways and demand the identical live set. */
+
+#define EQLEAF  (32u)
+#define EQSLOTS (16384u)
+#define EQCH    (512u)
+
+static uint8_t  g_eq_mem[EQSLOTS * EQLEAF + 256u];   /* + room to align */
+static uint8_t *g_eq_base;                          /* power-of-two arena window */
+static uint8_t  g_eq_meta[384u * 1024u];
+static void    *g_eq_live[EQSLOTS];
+static mu_buddy g_eq_b;
+
+/* The reference implementation of the merge, with a freelist scan. */
+static void eq_scan_free(mu_buddy *b, void *p)
+{
+    uint32_t level = mu_buddy_level_from_ptr(b, p);
+    uint32_t bs    = mu_level_block_size(b, level);
+    uint32_t block = mu_block_index(b, level, (uint32_t)((uint8_t *)p - b->base) / bs);
+
+    while (level > 0u) {
+        uint32_t pair = mu_buddy_pair(block);
+        if (mu_bit_get(b->merge_xor_map, pair) == 0u) {
+            mu_bit_set(b->merge_xor_map, pair, 1u);
+            mu_free_list_push(b, level, block);
+            return;
+        }
+        {
+            uint32_t buddy = mu_buddy_index(block);
+            uint32_t cur   = b->free_head[level];
+            while (cur != 0xFFFFFFFFu && cur != buddy) cur = b->free_next[cur];
+            if (cur != buddy) { mu_free_list_push(b, level, block); return; }
+            mu_free_list_unlink(b, level, buddy);
+        }
+        mu_bit_set(b->merge_xor_map, pair, 0u);
+        block = mu_parent_index(block);
+        --level;
+    }
+    mu_free_list_push(b, 0u, 0u);
+}
+
+/* One run of 32 fragmented bursts. fifo=0 merges in reverse (the parked sibling
+ * is at the head, so the scan is trivial), fifo=1 merges forward (the sibling is
+ * at the tail, the case the scan loses). Leaves the live set sorted. */
+static uint32_t eq_run(int scan, int fifo, uintptr_t *out)
+{
+    uint32_t k, r, n = 0u;
+
+    memset(g_eq_mem, 0, sizeof g_eq_mem);
+    g_eq_base = g_eq_mem + ((256u - ((uintptr_t)g_eq_mem % 256u)) % 256u);
+    memset(g_eq_meta, 0, sizeof g_eq_meta);
+    if (mu_buddy_init(&g_eq_b, g_eq_base, EQSLOTS * EQLEAF, EQLEAF,
+                      g_eq_meta, (uint32_t)sizeof g_eq_meta) != 1) return 0u;
+    for (k = 0u; k < EQSLOTS; ++k) g_eq_live[k] = mu_buddy_alloc(&g_eq_b, EQLEAF, 8u);
+
+    for (r = 0u; r < 32u; ++r) {
+        uint32_t base = (r * 2u * EQCH) % EQSLOTS;
+        for (k = 0u; k < EQCH; ++k) {           /* park the odd slots */
+            uint32_t slot = (base + 2u * k + 1u) % EQSLOTS;
+            if (g_eq_live[slot]) { mu_buddy_free(&g_eq_b, g_eq_live[slot]); g_eq_live[slot] = NULL; }
+        }
+        for (k = 0u; k < EQCH; ++k) {           /* merge their partners */
+            uint32_t e = fifo ? k : (EQCH - 1u - k);
+            uint32_t slot = (base + 2u * e) % EQSLOTS;
+            if (!g_eq_live[slot]) continue;
+            if (scan) eq_scan_free(&g_eq_b, g_eq_live[slot]);
+            else      mu_buddy_free(&g_eq_b, g_eq_live[slot]);
+            g_eq_live[slot] = NULL;
+        }
+        for (k = 0u; k < 2u * EQCH; ++k) {      /* refill */
+            uint32_t slot = (base + k) % EQSLOTS;
+            g_eq_live[slot] = mu_buddy_alloc(&g_eq_b, EQLEAF, 8u);
+        }
+    }
+
+    for (k = 0u; k < EQSLOTS; ++k) if (g_eq_live[k]) out[n++] = (uintptr_t)g_eq_live[k];
+    /* insertion sort: the set is already in slot order, and slot order is not
+     * address order once merges have split the arena differently. */
+    for (k = 1u; k < n; ++k) {
+        uintptr_t v = out[k];
+        uint32_t j = k;
+        while (j > 0u && out[j - 1u] > v) { out[j] = out[j - 1u]; --j; }
+        out[j] = v;
+    }
+    return n;
+}
+
+static void test_buddy_scan_equivalence(void)
+{
+    static uintptr_t a[EQSLOTS], c[EQSLOTS];
+    uint32_t k;
+
+    for (int fifo = 0; fifo < 2; ++fifo) {
+        uint32_t na = eq_run(0, fifo, a);
+        uint32_t nc = eq_run(1, fifo, c);
+        int same = (na == nc);
+        check(na == EQSLOTS, fifo ? "unlink vs scan (fifo): everything is live again"
+                                  : "unlink vs scan (lifo): everything is live again");
+        for (k = 0u; same && k < na; ++k) if (a[k] != c[k]) same = 0;
+        check(same, fifo ? "unlink vs scan (fifo): identical live pointer set"
+                         : "unlink vs scan (lifo): identical live pointer set");
+    }
+}
+
 int main(void)
 {
     g_mem = g_mem_raw + ((256u - ((uintptr_t)g_mem_raw % 256u)) % 256u);
@@ -282,6 +393,7 @@ int main(void)
     test_buddy_free_alternate();
     test_buddy_random_model();
     test_buddy_alignment_and_free_known();
+    test_buddy_scan_equivalence();
     printf("----------------------------------------------------------\n");
     printf("%s: %d checks, %d failures\n", g_fails ? "FAILED" : "PASSED", g_checks, g_fails);
     return g_fails ? 1 : 0;

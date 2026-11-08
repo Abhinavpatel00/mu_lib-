@@ -60,34 +60,84 @@ void     mu_buddy_free(mu_buddy* b, void* ptr);
 
 **Layout.** The arena is a complete binary tree of blocks: level 0 is one
 block of `total_size`, each level halves the block size down to `leaf_size`.
-Free blocks at each level are kept in an intrusive freelist threaded through a
-per-block `free_next` array.
+Free blocks at each level are kept in a **doubly linked** freelist threaded
+through per-block `free_next` / `free_prev` arrays.
 
-**Metadata.** Sized by `mu_buddy_metadata_size`, which you must supply in
-`metadata`:
+**Metadata.** Sized byte-for-byte by `mu_buddy_metadata_size`, which you must
+supply in `metadata`:
 
 | Array | Purpose |
 |---|---|
 | `free_head[num_levels]` | per-level freelist heads |
-| `free_next[num_blocks]` | intrusive freelist links |
+| `free_next[num_blocks]` | freelist next links |
+| `free_prev[num_blocks]` | freelist prev links — coalescing removes a block from the *middle* of a list, and only the prev link makes that O(1) |
 | `split_map` (bitset) | internal node is split? |
-| `merge_xor_map` (bitset) | buddy-pair "exactly one free" parity |
+| `merge_xor_map` (bitset) | sibling pair "exactly one of the two is free" |
+
+That is `levels*4 + num_blocks*8 + bits` bytes; for a 4 MiB arena with 32-byte
+leaves it is ~2 MiB of metadata, which is why the leaf size is a real
+memory/speed trade and not a detail.
+
+**The invariant.** `merge_xor_map` has one bit per **sibling pair**, indexed by
+the pair's *parent* index — children are `2i+1` and `2i+2`, so `index/2` maps
+them to two *different* bits and stalls half of all merges. The bit means
+"exactly one of the two siblings is in this level's freelist", and it is
+maintained from **both** sides:
+
+* on alloc, the pair we took a block from has zero free siblings left → clear;
+* on a fresh split, only the right child is pushed and the left is handed
+  straight to the caller, so "exactly one free" is true by construction;
+* on free, if the bit is 0 the sibling is allocated → set the bit and park the
+  block; if it is 1 the sibling is free and in the list → unlink it, clear the
+  bit, clear the parent's split bit, and merge at the parent level;
+* on merge the bit is cleared, because the merged parent is now the free thing.
 
 **Alloc.** Round `size` up to pow2 (min `leaf_size`, honoring `align`), find
-its level, pop a free block. If none, recurse up to split the smallest
-available ancestor: set `split_map` on the parent, push both children. Offset
-in the arena is `index_in_level * level_block_size`.
+its level, pop a free block. If none, walk up to the nearest ancestor that has a
+free block, pop it, and split down: set `split_map` on each node split, push the
+right child, carry the left one down. Offset in the arena is
+`index_in_level * level_block_size`.
 
 **Free.** Walk the tree down from the root using `split_map` to find the
 allocation's level (that's what `mu_buddy_free` does; `mu_buddy_free_known`
-skips the walk if you remembered the size). Then merge upward: flip the buddy
-pair's parity bit, and when both buddies are free, remove the buddy from the
-freelist, clear the parent's split bit, and continue at the parent level.
+skips the walk if you remembered the size), then merge upward as above.
 
-**Tradeoffs.** Fast (O(log n) alloc, amortized O(log n) free with merge),
-zero external fragmentation beyond pow2 rounding, but pow2-only granularity:
-a 1.1 MB request costs a 2 MB block. Internal overhead per allocation is up
-to ~2x for awkward sizes.
+**What the previous version got wrong, and why it matters.** The parity bit was
+*toggled* on free and never touched on alloc. Toggling encodes "exactly one
+free" only if a pair strictly alternates free/alloc — i.e. only if blocks are
+freed in the reverse of the allocation order. Reuse a freed block and free it
+again, or free every other block, and the bit says 1 while the sibling is
+allocated: the merge ran anyway, and the merged parent went onto the freelist on
+top of a live child. Two live allocations came out of the same bytes — measured
+as 16396 duplicate pointers in a 32768-block arena, with no crash to point at
+it, because both users just wrote to the same memory. The regression is now
+pinned by `perf_test/test_allocators.c` with a byte-level owner map, which
+catches aliasing whatever the free order; a test that only allocates, or only
+frees in LIFO order, would have kept it hidden forever.
+
+**Tradeoffs.** O(1) alloc from a non-empty level (O(levels) worst case when it
+has to split down), O(1) free including the merge, no external fragmentation
+beyond pow2 rounding, but pow2-only granularity: a 1.1 MB request costs a 2 MB
+block, so internal overhead is up to ~2x for awkward sizes. Alignment is
+derived from the arena base, so the arena has to be aligned to the largest
+`align` you intend to ask for.
+
+**Gate and numbers.** `make -C perf_test alloc-test` (10 148 checks: capacity,
+free-all-then-refill, free-every-other, a 20 000-step random model against a
+byte owner map, alignment, `free_known`, and the unlink-vs-scan equivalence that
+makes the bench's `_scan` baseline a fair one), `make -C perf_test alloc-bench`,
+and `perf_test/PERF_ALLOCATORS.md` for the measured cost of each path.
+
+What the bench says, since it is not what the design notes implied: the double
+link is **not** a speedup in LIFO free order (65.9 ns/op unlinked vs 61.6 ns/op
+scanned at a 256-entry freelist — no difference inside the CI, and `free_prev`
+costs 4 B per leaf on every push and pop). It pays 2.0x at a 256-entry freelist
+and 5.1x at 1024 **only** when the free order does not match the park order, and
+the extra cost is 2.1 ns per freelist step, the same at both lengths. The reason
+to have it is correctness — a merge has to remove the sibling from wherever it
+sits, and doing that by scan is O(n) — not the fast path. `mu_pool` remains
+~10x cheaper per operation (6.3 ns alloc+free) and `mu_arena` ~33x (2.0 ns), so
+the buddy is for generality, not for churn.
 
 ---
 
