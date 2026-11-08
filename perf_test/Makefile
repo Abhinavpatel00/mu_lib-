@@ -243,15 +243,18 @@ test_allocators: test_allocators.c ../mu/allocators.h
 # binary so the O(1)-unlink / O(n)-scan pair is compiled identically.
 #   make -C perf_test alloc-bench
 #   make -C perf_test alloc-bench-big     # same source, 1024-entry freelists
+# The leading '-' is deliberate: on this shared 2-vCPU guest several rows come
+# back above mu_bench's CV cutoff (see PERF_ALLOCATORS.md, field 3), so the run
+# exits non-zero even though every row printed. The CV column is the result.
 alloc-bench: bench_allocators
-	taskset -c 0 ./bench_allocators --samples=21
+	-taskset -c 0 ./bench_allocators --samples=21
 
 bench_allocators: bench_allocators.c ../mu/allocators.h ../mu/mu_bench.h
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_allocators.c -lm
 
 alloc-bench-big: bench_allocators.c ../mu/allocators.h ../mu/mu_bench.h
 	$(CC) $(CFLAGS) -DCHUNK=1024u $(INCLUDES) -o bench_allocators_big bench_allocators.c -lm
-	taskset -c 0 ./bench_allocators_big --filter=mergeburst --samples=21
+	-taskset -c 0 ./bench_allocators_big --filter=mergeburst --samples=21
 
 clean:
 	rm -f $(ORIG_TARGETS) $(ST_PROOFS) $(MT_PROOFS) card_asm_dump.s \
