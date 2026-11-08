@@ -39,6 +39,11 @@ tags
 /perf_test/test_fixed_o2
 /perf_test/test_fixed_o3
 /perf_test/bench_fixed
+/perf_test/test_save
+/perf_test/test_save_nohw
+/perf_test/bench_save
+/perf_test/save_test.bin
+/perf_test/save_test.bin.tmp
 /perf_test/bench_allocators
 /perf_test/bench_allocators_big
 /perf_test/test_time

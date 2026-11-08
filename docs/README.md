@@ -29,6 +29,7 @@ Subsystems ship as their own single headers:
 #include "mu/mu_easing.h"            /* 33 curves, derivatives, Bezier, LUT       */
 #include "mu/mu_time.h"             /* steady clock, calendar, ISO 8601, durations  */
 #include "mu/mu_fixed.h"            /* Q16.16 fixed point + CORDIC/table trig       */
+#include "mu/mu_save.h"             /* chunked save file: CRC32C, migration, atomic  */
 ```
 
 ## Documentation index
@@ -42,6 +43,7 @@ Subsystems ship as their own single headers:
 | [log.md](log.md) | `mu/mu_log.h`: levels, per-category thresholds, 4 sink kinds, ring buffer, structured kv, compile-time strip |
 | [time.md](time.md) | `mu/mu_time.h`: steady vs wall clock, proleptic Gregorian calendar, ISO 8601 timestamps, duration formatting; fixes `mu_log.h`'s "monotonic" timestamp; measured vs glibc (format 5.7x/8.1x, parse 4.1x, 8 179 268-check gate) |
 | [roadmap.md](roadmap.md) | what a **game** still needs from `mu`: the grep-backed gap table (save/load, input, camera, geometry queries, sequencing, audio, animation, assets), the five I would build in order with API shape + gate plan + bench plan, the half-day ones, and what I would not build |
+| [save.md](save.md) | `mu/mu_save.h`: chunked save container with per-chunk + whole-file CRC32C (table 1.7 GB/s vs SSE4.2 8.7 GB/s), versioned chunks that old binaries skip, a v1→v2→v3 migration ladder, and an atomic temp+fsync+rename write; gated by truncating at every byte, flipping a bit in every byte, and a roguelite save that must resume identically |
 | [fixed.md](fixed.md) | `mu/mu_fixed.h`: Q16.16 arithmetic, turns-based angles, table sin/cos (1 LSB), CORDIC atan2, integer sqrt; 262 249-check gate, no-libm link check, optimization-level determinism digest; measured vs glibc (sin 2.7× faster, atan2 1.6× slower, sqrt 44× slower) |
 | [scope-stack.md](scope-stack.md) | `mu/mu_scope_stack.h`: scoped linear allocator with destructors, `cleanup`-based auto rewind, longjmp purge |
 | [easing.md](easing.md) | `mu/mu_easing.h`: 33 Penner curves (par\_easings.h extended and corrected), curves as data, analytic velocities, parametric back/elastic, CSS cubic-bezier, Fritsch-Carlson monotone spline, CSS steps, baked LUTs; measured vs `par_easings.h` (geomean 1.27x) |

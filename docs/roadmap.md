@@ -14,7 +14,7 @@ is measured against *that* tree, not against a general idea of a game engine.
 
 | game subsystem | closest thing in the tree | what is actually missing | verdict |
 | --- | --- | --- | --- |
-| **save / load / replay** | `mu_bitserial.h` (bit writer + varints), `mu_fast_codec.h` | no container, no versioning, no migration, no checksums, no atomic file path, no record/replay loop. `grep save\|replay mu_roguelike.h` → nothing: the roguelite cannot be saved | **gap** |
+| **save / load / replay** | **`mu_save.h` — shipped** (chunks, CRC32C, migration ladder, atomic write). Record/replay of input frames still needs `mu_input.h` | replay loop only |
 | **input** | nothing (`grep -l input` → none) | action maps, deadzones, device merge, rebinding, **buffering windows**, chords, hold/tap, tick-quantised sampling for deterministic replay | **gap** |
 | **camera** | `mu_math.h` has `mu_frustum`, `mu_frustum_test_sphere`, `mu_frustum_cull_spheres_compact` | no camera at all: no follow, deadzone, lookahead, shake, bounds, screen↔world; `grep -in camera mu/*.h` → nothing | **gap** |
 | **geometry queries** | `mu_shape_aabb()` returns a lo/hi pair; frustum spheres | no AABB *type*, no ray/segment, no sweep, no closest-point, no ray-sphere/capsule test. `grep -E "mu_ray\|intersect\|sweep" mu_math.h` → nothing | **gap** |
@@ -218,9 +218,9 @@ across every voice start/stop; and a null test — silence in, exact silence out
 The roguelite is the only "game" in the tree, and it has zero persistence and a
 hand-rolled input/loop story. So:
 
-1. **`mu_save.h`** — unblocks the roguelite immediately, and the
-   corruption/truncation gate is the kind of thing that gets *harder* to add
-   later, once save formats exist in the wild.
+1. ~~**`mu_save.h`**~~ — **done** (committed; see `docs/save.md` and
+   `perf_test/PERF_SAVE.md`). The roguelite now has a persistence path, and the
+   truncate-at-every-offset gate exists before any save format is in the wild.
 2. **`mu_input.h`** — a turn-based roguelite needs it less than a real-time
    game, but the buffering/chord model is the same code and the replay hook
    (`mu_input_frame`) is what `mu_save` needs for demo recording.

@@ -292,7 +292,40 @@ clean:
 	      test_roguelike bench_roguelike test_noise bench_noise test_allocators \
       bench_allocators bench_allocators_big test_time bench_time \
       test_offset test_offset_lookahead bench_offset bench_offset_ff bench_offset_la \
-      test_fixed test_fixed_nolibm test_fixed_o0 test_fixed_o2 test_fixed_o3 bench_fixed
+      test_fixed test_fixed_nolibm test_fixed_o0 test_fixed_o2 test_fixed_o3 bench_fixed \
+      test_save test_save_nohw bench_save
+
+# ---- save format (mu/mu_save.h) -------------------------------------------
+# The gate doubles as the adversarial test: truncation at every byte offset,
+# a bit flipped in every byte, and a real roguelite save that has to resume
+# into a bit-identical future. save-test-nohw builds the same gate without the
+# SSE4.2 CRC and requires the identical digest, so the hardware path is proven
+# to be an optimization and not a format change.
+
+save-test: test_save
+	./test_save
+
+test_save: test_save.c ../mu/mu_save.h ../mu/mu_roguelike.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_save.c
+
+save-test-nohw: test_save test_save_nohw
+	@a=`./test_save --crc-hash`; b=`./test_save_nohw --crc-hash`; \
+	echo "  SSE4.2 crc   $$a"; echo "  table crc    $$b"; \
+	if [ "$$a" = "$$b" ]; then echo "PASSED: the crc is identical with and without the hardware path"; \
+	else echo "FAILED: the hardware crc changed the format"; exit 1; fi
+	./test_save_nohw | tail -1
+
+test_save_nohw: test_save.c ../mu/mu_save.h ../mu/mu_roguelike.h
+	$(CC) $(CFLAGS) $(INCLUDES) -DMU_SAVE_CRC_HW=0 -o $@ test_save.c
+
+save-bench: bench_save
+	./bench_save --samples=61
+
+save-bytes: bench_save
+	./bench_save --bytes
+
+bench_save: bench_save.c ../mu/mu_save.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_save.c -lm
 
 # ---- fixed point (mu/mu_fixed.h) ------------------------------------------
 # Three gates for three different claims: correctness/accuracy, "no libm" (a
@@ -374,5 +407,6 @@ offset-ab:
 .PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals \
         offset-test offset-test-la offset-bench offset-ab \
         fixed-test fixed-nolibm fixed-determinism fixed-bench \
+        save-test save-test-nohw save-bench save-bytes \
         shapes-test shapes-bench shapes-par easing-test easing-bench easing-par \
         headers-test noise-test noise-bench alloc-test alloc-bench alloc-bench-big clean

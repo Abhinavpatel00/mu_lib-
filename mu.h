@@ -73,6 +73,7 @@
 #include "mu/mu_scope_stack.h"
 #include "mu/mu_time.h"
 #include "mu/mu_fixed.h"
+#include "mu/mu_save.h"
 #include "mu/mu_log.h"
 
 /* mu/mu_bench.h is deliberately NOT in the umbrella: it defines a benchmark
