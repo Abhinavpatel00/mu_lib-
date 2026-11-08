@@ -13,7 +13,7 @@ Subsystems ship as their own single headers:
 #include "mu/mu_ecs.h"               /* entities, pools, transforms, prefabs      */
 #include "mu/mu_thread_system.h"     /* worker pool + atomics + primitives        */
 #include "mu/mu_task_scheduler.h"    /* priorities, dependencies, parallel_for    */
-#include "mu/mu_geometric_algebra.h" /* PGA / conformal math (requires cglm)      */
+#include "mu/mu_geometric_algebra.h" /* PGA / conformal math (on mu_math)        */
 #include "mu/mu_noise_math.h"        /* 1D-4D noise, cellular, fBm, warp, curl    */
 #include "mu/mu_roguelike.h"         /* grid gen, FOV, pathing, schedulers        */
 #include "mu/allocators.h"           /* arena, pool, buddy                        */
@@ -58,14 +58,16 @@ Subsystems ship as their own single headers:
 | [range-remap.md](range-remap.md) | `mu_range_remap`: sorted range-to-pointer map |
 | [math.md](math.md) | `mu/mu_noise_math.h`, `mu/mu_geometric_algebra.h`, `mu_bitpacking.h` quantization |
 | [mu_math.md](mu_math.md) | `mu/mu_math.h` — vec/quat/mat core, three inverse paths, SoA batch kernels; measured vs cglm |
+| [noise.md](noise.md) | `mu/mu_noise_math.h` — noise families, the cglm-free migration, what was adopted from SimplexNoise |
 | [ecs.md](ecs.md) | `mu/mu_ecs.h`: entity manager, pools, transforms, prefabs, resource registry |
 | [concurrency.md](concurrency.md) | `mu/mu_thread_system.h`, `mu/mu_task_scheduler.h` |
 | [roguelike.md](roguelike.md) | `mu/mu_roguelike.h`: RNG, grids, generation, FOV, pathfinding, tick scheduler |
 
 ## Design rules (apply to everything)
 
-- **C99, single header, no dependencies** except where noted (cglm for GA,
-  pthreads/Win32 for threading).
+- **C99, single header, no dependencies** beyond the OS itself (pthreads or
+  Win32 for threading). The geometric-algebra header now runs on `mu_math.h`
+  instead of cglm, so nothing in `mu/` includes a third-party header.
 - **Customization via macros, not vtables.** Override `mu_malloc` / `mu_free`,
   `MU_TS_MALLOC`, `MUC_MALLOC`, etc. before including to redirect allocation.
 - **`MU_API` / `MU_STATIC` linkage model.** Define `MU_STATIC` to make all

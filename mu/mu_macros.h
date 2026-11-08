@@ -2,6 +2,20 @@
 #ifndef MU_MACROS_H
 #define MU_MACROS_H
 
+/* POSIX feature test, before the first system header of the whole family.
+ *
+ * glibc locks its feature set as soon as <features.h> is reached, which the
+ * very next include (<stddef.h>) does, so a later #define is silently ignored
+ * and clock_gettime / mkstemp / mmap disappear under -std=c99. Defining it here
+ * means every entry point into the library gets the same libc surface --
+ * including the umbrella mu.h, where mu_common.h arrives too late. A caller
+ * that includes <stdio.h> before any mu header still has to define
+ * _POSIX_C_SOURCE itself; nothing can fix that from inside a header.
+ */
+#if !defined(_POSIX_C_SOURCE) && !defined(_DEFAULT_SOURCE) && !defined(__cplusplus) && !defined(_WIN32)
+#  define _POSIX_C_SOURCE 200809L
+#endif
+
 /*
  * mu_macros.h — the single macro layer for all of mylib.
  *

@@ -25,3 +25,7 @@ tags
 /perf_test/bench_easing_vs_par
 /perf_test/bench_shapes_vs_par
 /perf_test/shapes_out.obj
+/perf_test/test_noise
+/perf_test/bench_noise
+/perf_test/test_allocators
+/perf_test/bench_allocators

@@ -442,6 +442,18 @@ MU_INLINE float mu_vec4_dot(mu_vec4 a, mu_vec4 b)
 #endif
 }
 
+MU_INLINE float mu_vec4_length2(mu_vec4 a) { return mu_vec4_dot(a, a); }
+
+MU_INLINE float mu_vec4_length(mu_vec4 a) { return sqrtf(mu_vec4_dot(a, a)); }
+
+MU_INLINE mu_vec4 mu_vec4_normalize(mu_vec4 a)
+{
+    float len = mu_vec4_length(a);
+    if (len <= 1e-20f) return mu_vec4_zero();
+    return mu_vec4_make(a.x / len, a.y / len, a.z / len, a.w / len);
+}
+
+
 MU_INLINE mu_vec4 mu_vec4_lerp(mu_vec4 a, mu_vec4 b, float t)
 {
     mu_vec4 r;

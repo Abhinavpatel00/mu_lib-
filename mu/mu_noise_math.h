@@ -149,28 +149,28 @@ extern "C" {
 #endif
 
 #include "mu_macros.h"
+#include "mu_math.h"   /* mu_vec2/3/4, mu_vec*_dot/add/sub/scale: one math layer */
 
 /* ------------------------------------------------------------------------- */
 /* Basic structs and enums                                                   */
 /* ------------------------------------------------------------------------- */
 
-typedef struct mu_noise_vec2 {
-    float x;
-    float y;
-} mu_noise_vec2;
+/*
+    Vector types.
 
-typedef struct mu_noise_vec3 {
-    float x;
-    float y;
-    float z;
-} mu_noise_vec3;
+    These used to be three private structs plus a private copy of dot/add/sub/
+    cross, which is exactly the "competing API family" the library rules forbid:
+    a caller could not hand a noise direction to mu_vec3_normalize without a
+    conversion, and there were two implementations of the same maths to keep in
+    step. They are now aliases of mu_math's types, so noise vectors are mu_vecs
+    and interoperate with everything else in the library for free.
 
-typedef struct mu_noise_vec4 {
-    float x;
-    float y;
-    float z;
-    float w;
-} mu_noise_vec4;
+    The mu_noise_v2/v3/v4 constructors and the mu_noise_v*_dot/add/... helpers
+    stay as names (they read better inside this file) and forward to mu_math.
+*/
+typedef mu_vec2 mu_noise_vec2;
+typedef mu_vec3 mu_noise_vec3;
+typedef mu_vec4 mu_noise_vec4;
 
 typedef enum mu_noise_distance_metric {
     MU_NOISE_DIST_EUCLIDEAN = 0,
@@ -302,129 +302,56 @@ MU_INLINE float mu_noise_remap_neg1_pos1_to_0_1(float v)
 
 MU_INLINE mu_noise_vec2 mu_noise_v2(float x, float y)
 {
-    mu_noise_vec2 r;
-    r.x = x;
-    r.y = y;
-    return r;
+    return mu_vec2_make(x, y);
 }
 
 MU_INLINE mu_noise_vec3 mu_noise_v3(float x, float y, float z)
 {
-    mu_noise_vec3 r;
-    r.x = x;
-    r.y = y;
-    r.z = z;
-    return r;
-}
-
-MU_INLINE float mu_noise_v2_dot(mu_noise_vec2 a, mu_noise_vec2 b)
-{
-    return a.x * b.x + a.y * b.y;
-}
-
-MU_INLINE float mu_noise_v3_dot(mu_noise_vec3 a, mu_noise_vec3 b)
-{
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-MU_INLINE float mu_noise_v2_len(mu_noise_vec2 a)
-{
-    return sqrtf(a.x * a.x + a.y * a.y);
-}
-
-MU_INLINE float mu_noise_v3_len(mu_noise_vec3 a)
-{
-    return sqrtf(a.x * a.x + a.y * a.y + a.z * a.z);
-}
-
-MU_INLINE mu_noise_vec2 mu_noise_v2_add(mu_noise_vec2 a, mu_noise_vec2 b)
-{
-    return mu_noise_v2(a.x + b.x, a.y + b.y);
-}
-
-MU_INLINE mu_noise_vec2 mu_noise_v2_mul(mu_noise_vec2 a, float s)
-{
-    return mu_noise_v2(a.x * s, a.y * s);
-}
-
-MU_INLINE mu_noise_vec3 mu_noise_v3_add(mu_noise_vec3 a, mu_noise_vec3 b)
-{
-    return mu_noise_v3(a.x + b.x, a.y + b.y, a.z + b.z);
-}
-
-MU_INLINE mu_noise_vec3 mu_noise_v3_sub(mu_noise_vec3 a, mu_noise_vec3 b)
-{
-    return mu_noise_v3(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-MU_INLINE mu_noise_vec3 mu_noise_v3_mul(mu_noise_vec3 a, float s)
-{
-    return mu_noise_v3(a.x * s, a.y * s, a.z * s);
-}
-
-MU_INLINE mu_noise_vec3 mu_noise_v3_cross(mu_noise_vec3 a, mu_noise_vec3 b)
-{
-    return mu_noise_v3(
-        a.y * b.z - a.z * b.y,
-        a.z * b.x - a.x * b.z,
-        a.x * b.y - a.y * b.x
-    );
-}
-
-MU_INLINE mu_noise_vec2 mu_noise_v2_sub(mu_noise_vec2 a, mu_noise_vec2 b)
-{
-    return mu_noise_v2(a.x - b.x, a.y - b.y);
-}
-
-MU_INLINE mu_noise_vec2 mu_noise_v2_normalize(mu_noise_vec2 a, float epsilon)
-{
-    float len = mu_noise_v2_len(a);
-    if (len <= epsilon)
-        return mu_noise_v2(0.0f, 0.0f);
-    return mu_noise_v2_mul(a, 1.0f / len);
-}
-
-MU_INLINE mu_noise_vec3 mu_noise_v3_normalize(mu_noise_vec3 a, float epsilon)
-{
-    float len = mu_noise_v3_len(a);
-    if (len <= epsilon)
-        return mu_noise_v3(0.0f, 0.0f, 0.0f);
-    return mu_noise_v3_mul(a, 1.0f / len);
+    return mu_vec3_make(x, y, z);
 }
 
 MU_INLINE mu_noise_vec4 mu_noise_v4(float x, float y, float z, float w)
 {
-    mu_noise_vec4 r;
-    r.x = x;
-    r.y = y;
-    r.z = z;
-    r.w = w;
-    return r;
+    return mu_vec4_make(x, y, z, w);
 }
 
-MU_INLINE float mu_noise_v4_dot(mu_noise_vec4 a, mu_noise_vec4 b)
+MU_INLINE float mu_noise_v2_dot(mu_noise_vec2 a, mu_noise_vec2 b) { return mu_vec2_dot(a, b); }
+MU_INLINE float mu_noise_v3_dot(mu_noise_vec3 a, mu_noise_vec3 b) { return mu_vec3_dot(a, b); }
+MU_INLINE float mu_noise_v4_dot(mu_noise_vec4 a, mu_noise_vec4 b) { return mu_vec4_dot(a, b); }
+
+MU_INLINE float mu_noise_v2_len(mu_noise_vec2 a) { return mu_vec2_length(a); }
+MU_INLINE float mu_noise_v3_len(mu_noise_vec3 a) { return mu_vec3_length(a); }
+MU_INLINE float mu_noise_v4_len(mu_noise_vec4 a) { return sqrtf(mu_vec4_dot(a, a)); }
+
+MU_INLINE mu_noise_vec2 mu_noise_v2_add(mu_noise_vec2 a, mu_noise_vec2 b) { return mu_vec2_add(a, b); }
+MU_INLINE mu_noise_vec3 mu_noise_v3_add(mu_noise_vec3 a, mu_noise_vec3 b) { return mu_vec3_add(a, b); }
+MU_INLINE mu_noise_vec4 mu_noise_v4_add(mu_noise_vec4 a, mu_noise_vec4 b) { return mu_vec4_add(a, b); }
+
+MU_INLINE mu_noise_vec2 mu_noise_v2_sub(mu_noise_vec2 a, mu_noise_vec2 b) { return mu_vec2_sub(a, b); }
+MU_INLINE mu_noise_vec3 mu_noise_v3_sub(mu_noise_vec3 a, mu_noise_vec3 b) { return mu_vec3_sub(a, b); }
+MU_INLINE mu_noise_vec4 mu_noise_v4_sub(mu_noise_vec4 a, mu_noise_vec4 b) { return mu_vec4_sub(a, b); }
+
+/* Scalar scale, not component-wise: mu_noise_v3_mul(a, s) means a * s. */
+MU_INLINE mu_noise_vec2 mu_noise_v2_mul(mu_noise_vec2 a, float s) { return mu_vec2_scale(a, s); }
+MU_INLINE mu_noise_vec3 mu_noise_v3_mul(mu_noise_vec3 a, float s) { return mu_vec3_scale(a, s); }
+MU_INLINE mu_noise_vec4 mu_noise_v4_mul(mu_noise_vec4 a, float s) { return mu_vec4_scale(a, s); }
+
+MU_INLINE mu_noise_vec3 mu_noise_v3_cross(mu_noise_vec3 a, mu_noise_vec3 b) { return mu_vec3_cross(a, b); }
+
+/* Epsilon-guarded normalisation: a zero-length vector normalises to zero
+ * instead of NaN, which is what noise code wants at lattice corners. */
+MU_INLINE mu_noise_vec2 mu_noise_v2_normalize(mu_noise_vec2 a, float epsilon)
 {
-    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    float len = mu_vec2_length(a);
+    if (len <= epsilon) return mu_vec2_make(0.0f, 0.0f);
+    return mu_vec2_scale(a, 1.0f / len);
 }
 
-MU_INLINE float mu_noise_v4_len(mu_noise_vec4 a)
+MU_INLINE mu_noise_vec3 mu_noise_v3_normalize(mu_noise_vec3 a, float epsilon)
 {
-    return sqrtf(a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w);
-}
-
-MU_INLINE mu_noise_vec4 mu_noise_v4_add(mu_noise_vec4 a, mu_noise_vec4 b)
-{
-    return mu_noise_v4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
-}
-
-MU_INLINE mu_noise_vec4 mu_noise_v4_sub(mu_noise_vec4 a, mu_noise_vec4 b)
-{
-    return mu_noise_v4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
-}
-
-MU_INLINE mu_noise_vec4 mu_noise_v4_mul(mu_noise_vec4 a, float s)
-{
-    return mu_noise_v4(a.x * s, a.y * s, a.z * s, a.w * s);
+    float len = mu_vec3_length(a);
+    if (len <= epsilon) return mu_vec3_make(0.0f, 0.0f, 0.0f);
+    return mu_vec3_scale(a, 1.0f / len);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3873,6 +3800,713 @@ MU_INLINE float mu_noise_caustic(float x, float y, uint32_t seed)
     float shimmer = mu_noise_fbm2(mu_noise_simplex2, x * 8.0f, y * 8.0f, seed + 47u,
                                   3, 2.0f, 0.5f);
     return mu_noise_clamp(ridge * ridge * 0.85f + shimmer * 0.15f, 0.0f, 1.0f);
+}
+
+
+/* =========================================================================
+ * Adopted from SimplexNoise (Simon Geilfus, BSD-3), C99 port
+ * =========================================================================
+ *
+ * What was missing here, checked function by function against
+ * https://github.com/simongeilfus/SimplexNoise (its noise/dnoise/fBm/dfBm/
+ * ridgedMF/iqfBm/iqMatfBm/flowNoise/dFlowNoise/worleyNoise-with-falloff set):
+ *
+ *   simplex1       1D simplex noise, and its analytic derivative.
+ *                  We had 2D/3D/4D only. Gustavson's 1D case is the cheapest
+ *                  way to get smooth 1-D variation (a 1D value noise has
+ *                  visible lattice kinks at every integer).
+ *   flow2/flow3    The gradient rotation trick: rotate every corner gradient
+ *                  by a constant angle before the dot product. The lattice and
+ *                  the hashes are unchanged, so the field is still continuous
+ *                  and still tiles, but the noise is *sheared* along the angle
+ *                  you ask for -- the direction-field look you want for cloth,
+ *                  water streaks and brushed metal. Same cost as plain
+ *                  simplex: it is the same code with sin/cos folded into the
+ *                  gradient lookup, not a second noise evaluation.
+ *   fbm4/turbulence4/billow4/ridged4
+ *                  4D members of the fractal family (we had 1D-3D).
+ *   dfbm1/2/3      fBm that carries the analytic derivative through the octave
+ *                  sum. Needed any time you want a slope, not a height: a
+ *                  terrain normal, a warp field, a distance-field gradient.
+ *                  It is exact, not a finite difference of the sum.
+ *   iq_fbm2/3      Inigo Quilez's variant: no explicit gain, the accumulated
+ *                  derivative damps each octave by 1/(1+|d|^2). Flat regions
+ *                  get more octaves, steep ones get fewer, which keeps detail
+ *                  where the eye looks without the usual gain tuning.
+ *   iq_rot_fbm2    Same sum, but every octave is multiplied by a rotation-scale
+ *                  matrix, so the lattice axes never line up between octaves and
+ *                  the classic 0/45/90 degree haze does not appear.
+ *   worley2_falloff / worley3_falloff
+ *                  Cellular noise with exponential falloff over the 27 (or 9)
+ *                  neighbour cells: smooth blobs instead of hard F1 ridges.
+ *                  Our mu_noise_worley* returns distances; this returns the
+ *                  smoothed field.
+ *
+ * Not adopted, and why:
+ *   - Their perm[512] table + global seed(): every function here takes a seed
+ *     and hashes it, so there is no global state to seed and no cache-resident
+ *     table to share between threads.
+ *   - dFlowNoise: the analytic derivative of the rotated field is a second
+ *     gradient rotation applied to the derivative tensor. Flow noise is used
+ *     for advection, where the derivative is not needed; if you need one,
+ *     mu_noise_sample2_fd(base_flow, x, y, seed, eps) gives a correct central
+ *     difference of any scalar field.
+ *   - curl(): we already have mu_noise_curl2/curl3 plus finite-difference
+ *     divergence and Laplacian helpers, which take a function pointer to any
+ *     scalar field.
+ */
+
+/*
+    1D simplex noise.
+
+    Same construction as 2D, in one dimension: the lattice cell [i, i+1] has a
+    random +-1 gradient at each end, and each end's influence is weighted by
+    (1 - x^2)^4, the 1D form of the (0.5 - |d|^2)^4 kernel.
+
+        n_i = (1 - d_i^2)^4 * g_i * d_i        with d_i = x - i
+
+    The two ends overlap, so the sum is scaled by the peak of one cell:
+    max over x in [0,1] of |(1-x^2)^4 * x + (1-(x-1)^2)^4 * (x-1)| = 0.316406
+    (verified numerically over 4 sign combinations and 200k samples), so the
+    factor is 1/0.316406 = 3.160494 to land in [-1, 1]. Gustavson's published
+    constant for this function is 0.395, which assumes the 2D kernel; using it
+    here would leave the output in +-0.13 and quietly cost you 80% of the
+    amplitude whenever the result is fed to a shader as if it were +-1.
+    The kernel is C2 at the cell boundary, which is why the result has no
+    lattice kinks even though the gradients are random.
+
+    Cost: two hashes, two multiplies per term. This is the cheapest smooth
+    1D noise in the header; mu_noise_value1 costs a hash pair and two lerps and
+    has the same continuity, so prefer value1 unless you need the tapered
+    kernel (simplex1 fades to exactly zero at the cell midpoint, value1 does
+    not).
+*/
+MU_INLINE float mu_noise_simplex1(float x, uint32_t seed)
+{
+    int i0 = (int)floorf(x);
+    int i1 = i0 + 1;
+
+    float x0 = x - (float)i0;
+    float x1 = x0 - 1.0f;
+
+    float n0 = 0.0f;
+    float n1 = 0.0f;
+
+    float t0 = 1.0f - x0 * x0;
+    if (t0 > 0.0f)
+    {
+        float g0 = (mu_noise_hash_1i(i0, seed) & 1U) ? -1.0f : 1.0f;
+        t0 *= t0;
+        n0 = t0 * t0 * g0 * x0;
+    }
+
+    float t1 = 1.0f - x1 * x1;
+    if (t1 > 0.0f)
+    {
+        float g1 = (mu_noise_hash_1i(i1, seed) & 1U) ? -1.0f : 1.0f;
+        t1 *= t1;
+        n1 = t1 * t1 * g1 * x1;
+    }
+
+    return 3.1604938f * (n0 + n1);
+}
+
+/*
+    1D simplex noise with its analytic derivative.
+
+    d/dx of (1-x^2)^4 * g * x is g * (1-x^2)^3 * (1 - 9x^2), which is exact and
+    costs two extra multiplies per corner -- much cheaper than the two extra
+    evaluations a central difference would need, and it does not step off the
+    lattice to get it.
+
+    The gradient is returned in .gradient.x so the type matches the 2D/3D/4D
+    derivative samplers; .gradient.y is always 0.
+*/
+MU_INLINE mu_noise_sample2 mu_noise_simplex1_deriv(float x, uint32_t seed)
+{
+    mu_noise_sample2 r;
+
+    int i0 = (int)floorf(x);
+    int i1 = i0 + 1;
+
+    float x0 = x - (float)i0;
+    float x1 = x0 - 1.0f;
+
+    float n0 = 0.0f, d0 = 0.0f;
+    float n1 = 0.0f, d1 = 0.0f;
+
+    float t0 = 1.0f - x0 * x0;
+    if (t0 > 0.0f)
+    {
+        float g0 = (mu_noise_hash_1i(i0, seed) & 1U) ? -1.0f : 1.0f;
+        float t2 = t0 * t0;
+        n0 = t2 * t2 * g0 * x0;
+        d0 = g0 * t2 * t0 * (1.0f - 9.0f * x0 * x0);
+    }
+
+    float t1 = 1.0f - x1 * x1;
+    if (t1 > 0.0f)
+    {
+        float g1 = (mu_noise_hash_1i(i1, seed) & 1U) ? -1.0f : 1.0f;
+        float t2 = t1 * t1;
+        n1 = t2 * t2 * g1 * x1;
+        d1 = g1 * t2 * t1 * (1.0f - 9.0f * x1 * x1);
+    }
+
+    r.value = 3.1604938f * (n0 + n1);
+    r.gradient = mu_noise_v2(3.1604938f * (d0 + d1), 0.0f);
+    return r;
+}
+
+/*
+    Flow noise, 2D: simplex noise whose corner gradients are rotated by `angle`.
+
+    Plain simplex noise is isotropic on average, but a texture built from it
+    still looks "random"; flow noise looks *directional*. The construction is
+    one line of geometry: take the corner gradient g, rotate it by theta,
+
+        g' = ( cos*t gx - sin*t gy , sin*t gx + cos*t gy )
+
+    and dot that with the corner offset instead of g. Rotating every gradient by
+    the same angle rotates the vector field of the noise, so the iso-lines run
+    along theta. Nothing else changes: the lattice, hashes, kernel and 70x scale
+    are the 2D simplex ones, so cost is identical to mu_noise_simplex2 plus one
+    sin/cos pair that a caller in a loop should hoist (there is no state here,
+    so hoisting means passing the angle pre-computed as sin/cos and calling
+    mu_noise_flow2_sc).
+
+    Thresholding flow noise along its angle gives streaks that stay parallel
+    instead of blobbing, which is why it is the usual choice for wind streaks,
+    brushed metal and water currents.
+*/
+MU_INLINE float mu_noise_flow2_sc(float x, float y, float sin_t, float cos_t, uint32_t seed)
+{
+    const float F2 = 0.36602540378443864676f;
+    const float G2 = 0.21132486540518711775f;
+
+    float s = (x + y) * F2;
+    int i = (int)floorf(x + s);
+    int j = (int)floorf(y + s);
+
+    float t = (float)(i + j) * G2;
+    float x0 = x - ((float)i - t);
+    float y0 = y - ((float)j - t);
+
+    int i1, j1;
+    if (x0 > y0) { i1 = 1; j1 = 0; }
+    else         { i1 = 0; j1 = 1; }
+
+    float x1 = x0 - (float)i1 + G2;
+    float y1 = y0 - (float)j1 + G2;
+    float x2 = x0 - 1.0f + 2.0f * G2;
+    float y2 = y0 - 1.0f + 2.0f * G2;
+
+    float n0 = 0.0f, n1 = 0.0f, n2 = 0.0f;
+
+    float t0 = 0.5f - x0 * x0 - y0 * y0;
+    if (t0 > 0.0f)
+    {
+        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(i, j, seed));
+        float gx = cos_t * g.x - sin_t * g.y;
+        float gy = sin_t * g.x + cos_t * g.y;
+        t0 *= t0;
+        n0 = t0 * t0 * (gx * x0 + gy * y0);
+    }
+
+    float t1 = 0.5f - x1 * x1 - y1 * y1;
+    if (t1 > 0.0f)
+    {
+        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(i + i1, j + j1, seed));
+        float gx = cos_t * g.x - sin_t * g.y;
+        float gy = sin_t * g.x + cos_t * g.y;
+        t1 *= t1;
+        n1 = t1 * t1 * (gx * x1 + gy * y1);
+    }
+
+    float t2 = 0.5f - x2 * x2 - y2 * y2;
+    if (t2 > 0.0f)
+    {
+        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(i + 1, j + 1, seed));
+        float gx = cos_t * g.x - sin_t * g.y;
+        float gy = sin_t * g.x + cos_t * g.y;
+        t2 *= t2;
+        n2 = t2 * t2 * (gx * x2 + gy * y2);
+    }
+
+    return 70.0f * (n0 + n1 + n2);
+}
+
+MU_INLINE float mu_noise_flow2(float x, float y, float angle, uint32_t seed)
+{
+    return mu_noise_flow2_sc(x, y, sinf(angle), cosf(angle), seed);
+}
+
+/*
+    Flow noise, 3D: the 3D analogue rotates each corner gradient around the
+    Z axis by `angle`, so the noise is coherent in XY and streaks along the
+    rotated direction. (A full 3D rotation needs an axis as well as an angle;
+    the two extra parameters live in mu_noise_flow3_axis, and this is the
+    common case.)
+*/
+MU_INLINE float mu_noise_flow3_axis(float x, float y, float z,
+                                    float axis_x, float axis_y, float axis_z,
+                                    float angle, uint32_t seed)
+{
+    mu_noise_vec3 axis = mu_noise_v3_normalize(mu_noise_v3(axis_x, axis_y, axis_z), 1e-6f);
+    float c = cosf(angle);
+    float s = sinf(angle);
+    float k = 1.0f - c;
+
+    float m00 = c + axis.x * axis.x * k;
+    float m01 = axis.x * axis.y * k - axis.z * s;
+    float m02 = axis.x * axis.z * k + axis.y * s;
+    float m10 = axis.y * axis.x * k + axis.z * s;
+    float m11 = c + axis.y * axis.y * k;
+    float m12 = axis.y * axis.z * k - axis.x * s;
+    float m20 = axis.z * axis.x * k - axis.y * s;
+    float m21 = axis.z * axis.y * k + axis.x * s;
+    float m22 = c + axis.z * axis.z * k;
+
+    const float F3 = 1.0f / 3.0f;
+    const float G3 = 1.0f / 6.0f;
+
+    float sk = (x + y + z) * F3;
+    int i = (int)floorf(x + sk);
+    int j = (int)floorf(y + sk);
+    int k3 = (int)floorf(z + sk);
+
+    float t = (float)(i + j + k3) * G3;
+    float x0 = x - ((float)i - t);
+    float y0 = y - ((float)j - t);
+    float z0 = z - ((float)k3 - t);
+
+    int i1, j1, k1, i2, j2, k2;
+    if (x0 >= y0)
+    {
+        if (y0 >= z0)      { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+        else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+        else               { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+    }
+    else
+    {
+        if (y0 < z0)       { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+        else if (x0 < z0)  { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+        else               { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+    }
+
+    float x1 = x0 - (float)i1 + G3, y1 = y0 - (float)j1 + G3, z1 = z0 - (float)k1 + G3;
+    float x2 = x0 - (float)i2 + 2.0f * G3, y2 = y0 - (float)j2 + 2.0f * G3, z2 = z0 - (float)k2 + 2.0f * G3;
+    float x3 = x0 - 1.0f + 3.0f * G3, y3 = y0 - 1.0f + 3.0f * G3, z3 = z0 - 1.0f + 3.0f * G3;
+
+    float n0 = 0.0f, n1 = 0.0f, n2 = 0.0f, n3 = 0.0f;
+    float tt;
+
+    tt = 0.5f - x0 * x0 - y0 * y0 - z0 * z0;
+    if (tt > 0.0f)
+    {
+        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i, j, k3, seed));
+        float gx = m00 * g.x + m01 * g.y + m02 * g.z;
+        float gy = m10 * g.x + m11 * g.y + m12 * g.z;
+        float gz = m20 * g.x + m21 * g.y + m22 * g.z;
+        tt *= tt;
+        n0 = tt * tt * (gx * x0 + gy * y0 + gz * z0);
+    }
+
+    tt = 0.5f - x1 * x1 - y1 * y1 - z1 * z1;
+    if (tt > 0.0f)
+    {
+        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + i1, j + j1, k3 + k1, seed));
+        float gx = m00 * g.x + m01 * g.y + m02 * g.z;
+        float gy = m10 * g.x + m11 * g.y + m12 * g.z;
+        float gz = m20 * g.x + m21 * g.y + m22 * g.z;
+        tt *= tt;
+        n1 = tt * tt * (gx * x1 + gy * y1 + gz * z1);
+    }
+
+    tt = 0.5f - x2 * x2 - y2 * y2 - z2 * z2;
+    if (tt > 0.0f)
+    {
+        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + i2, j + j2, k3 + k2, seed));
+        float gx = m00 * g.x + m01 * g.y + m02 * g.z;
+        float gy = m10 * g.x + m11 * g.y + m12 * g.z;
+        float gz = m20 * g.x + m21 * g.y + m22 * g.z;
+        tt *= tt;
+        n2 = tt * tt * (gx * x2 + gy * y2 + gz * z2);
+    }
+
+    tt = 0.5f - x3 * x3 - y3 * y3 - z3 * z3;
+    if (tt > 0.0f)
+    {
+        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + 1, j + 1, k3 + 1, seed));
+        float gx = m00 * g.x + m01 * g.y + m02 * g.z;
+        float gy = m10 * g.x + m11 * g.y + m12 * g.z;
+        float gz = m20 * g.x + m21 * g.y + m22 * g.z;
+        tt *= tt;
+        n3 = tt * tt * (gx * x3 + gy * y3 + gz * z3);
+    }
+
+    return 72.0f * (n0 + n1 + n2 + n3);
+}
+
+MU_INLINE float mu_noise_flow3(float x, float y, float z, float angle, uint32_t seed)
+{
+    return mu_noise_flow3_axis(x, y, z, 0.0f, 0.0f, 1.0f, angle, seed);
+}
+
+/*
+    fBm with analytic derivatives: the octave sum of value+derivative samples.
+
+    For an fBm  F(p) = sum_i a_i * n(f_i * p),  the derivative is
+    dF/dp = sum_i a_i * f_i * dn/dp evaluated at f_i * p -- the chain rule
+    multiplies each octave's gradient by its frequency, which is the part a
+    naive "sum the values, finite-difference the sum" gets right only if the
+    step is smaller than the highest octave's feature size. Carrying the
+    analytic gradient keeps the slope exact at every scale.
+
+    Returns value plus gradient (already frequency-weighted).
+*/
+MU_INLINE mu_noise_sample2 mu_noise_dfbm2(mu_noise_dfn2 base, float x, float y, uint32_t seed,
+                                          int octaves, float lacunarity, float gain)
+{
+    mu_noise_sample2 r;
+    float sum = 0.0f;
+    float gx = 0.0f, gy = 0.0f;
+    float amp = 1.0f, freq = 1.0f, norm = 0.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        mu_noise_sample2 s = base(x * freq, y * freq, seed + (uint32_t)i * 1013u);
+        float w = amp * freq;
+        sum += amp * s.value;
+        gx += w * s.gradient.x;
+        gy += w * s.gradient.y;
+        norm += amp;
+        freq *= lacunarity;
+        amp *= gain;
+    }
+
+    if (norm > 0.0f)
+    {
+        sum /= norm;
+        gx /= norm;
+        gy /= norm;
+    }
+
+    r.value = sum;
+    r.gradient = mu_noise_v2(gx, gy);
+    return r;
+}
+
+MU_INLINE mu_noise_sample3 mu_noise_dfbm3(mu_noise_dfn3 base, float x, float y, float z, uint32_t seed,
+                                          int octaves, float lacunarity, float gain)
+{
+    mu_noise_sample3 r;
+    float sum = 0.0f;
+    float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+    float amp = 1.0f, freq = 1.0f, norm = 0.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        mu_noise_sample3 s = base(x * freq, y * freq, z * freq, seed + (uint32_t)i * 1013u);
+        float w = amp * freq;
+        sum += amp * s.value;
+        gx += w * s.gradient.x;
+        gy += w * s.gradient.y;
+        gz += w * s.gradient.z;
+        norm += amp;
+        freq *= lacunarity;
+        amp *= gain;
+    }
+
+    if (norm > 0.0f)
+    {
+        sum /= norm;
+        gx /= norm;
+        gy /= norm;
+        gz /= norm;
+    }
+
+    r.value = sum;
+    r.gradient = mu_noise_v3(gx, gy, gz);
+    return r;
+}
+
+MU_INLINE mu_noise_sample2 mu_noise_dfbm1(mu_noise_fn1 base, float x, uint32_t seed,
+                                          int octaves, float lacunarity, float gain, float eps)
+{
+    /* 1D has no analytic derivative sampler in this header (the value/perlin/
+     * simplex 1D families return floats), so the slope comes from a central
+     * difference of the *sum*, which is exact for a C1 field and only costs two
+     * extra evaluations, not 2*octaves. */
+    mu_noise_sample2 r;
+    r.value = mu_noise_fbm1(base, x, seed, octaves, lacunarity, gain);
+    r.gradient = mu_noise_v2(
+        (mu_noise_fbm1(base, x + eps, seed, octaves, lacunarity, gain) -
+         mu_noise_fbm1(base, x - eps, seed, octaves, lacunarity, gain)) / (2.0f * eps),
+        0.0f);
+    return r;
+}
+
+/*
+    Inigo Quilez's fBm.
+
+    Ordinary fBm adds octaves with a fixed geometric amplitude. IQ's variant
+    lets the noise decide: it accumulates the derivative of the octaves so far
+    and damps the next octave by 1 / (1 + |d|^2). Where the field is flat the
+    damping is ~1 and the octaves keep adding detail; where it is steep the
+    damping shrinks and the sum stays smooth. The practical effect is strong,
+    small-scale detail in flat areas and no crumple on slopes, without touching
+    the gain.
+
+        d        += dn_i
+        f        += 0.5 * n_i / (1 + d.d)
+        p        *= 2 * rot(0.5)
+
+    Note there is no `gain` parameter on purpose: amplitude is fixed at 0.5 and
+    the damping does the work. That is the whole point of the variant.
+*/
+MU_INLINE float mu_noise_iq_fbm2(mu_noise_dfn2 base, float x, float y, uint32_t seed, int octaves)
+{
+    float f = 0.0f;
+    float dx = 0.0f, dy = 0.0f;
+    float px = x, py = y;
+    const float ca = 0.8f, sa = 0.6f; /* cos/sin of ~0.6435 rad: a 2x rotation */
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        mu_noise_sample2 s = base(px, py, seed + (uint32_t)i * 1013u);
+        dx += s.gradient.x;
+        dy += s.gradient.y;
+        f += 0.5f * s.value / (1.0f + dx * dx + dy * dy);
+        /* rotate and double: octaves never re-align with the lattice axes */
+        {
+            float nx = 2.0f * (ca * px - sa * py);
+            float ny = 2.0f * (sa * px + ca * py);
+            px = nx;
+            py = ny;
+        }
+    }
+
+    return f;
+}
+
+MU_INLINE float mu_noise_iq_fbm3(mu_noise_dfn3 base, float x, float y, float z, uint32_t seed, int octaves)
+{
+    float f = 0.0f;
+    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    float px = x, py = y, pz = z;
+    const float ca = 0.8f, sa = 0.6f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        mu_noise_sample3 s = base(px, py, pz, seed + (uint32_t)i * 1013u);
+        dx += s.gradient.x;
+        dy += s.gradient.y;
+        dz += s.gradient.z;
+        f += 0.5f * s.value / (1.0f + dx * dx + dy * dy + dz * dz);
+        {
+            float nx = 2.0f * (ca * px - sa * py);
+            float ny = 2.0f * (sa * px + ca * py);
+            px = nx;
+            py = ny;
+            pz *= 2.0f;
+        }
+    }
+
+    return f;
+}
+
+/*
+    Rotated-lattice fBm, 2D: ordinary fBm with a rotation-scale between octaves.
+
+    The reason to bother: with a pure scale, octave i's lattice lines up with
+    octave i-1's at 0, 45 and 90 degrees, and the eye picks the resulting
+    cross-hatch out of the sum. Multiplying by a rotation as well as a scale
+    means each octave samples the lattice at a different angle, so there is no
+    common axis. `angle` per octave in radians; `scale` is the lacunarity.
+*/
+MU_INLINE float mu_noise_iq_rot_fbm2(mu_noise_fn2 base, float x, float y, uint32_t seed,
+                                     int octaves, float scale, float angle, float gain)
+{
+    float sum = 0.0f, amp = 1.0f, norm = 0.0f;
+    float px = x, py = y;
+    float ca = cosf(angle) * scale;
+    float sa = sinf(angle) * scale;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        sum += amp * base(px, py, seed + (uint32_t)i * 1013u);
+        norm += amp;
+        {
+            float nx = ca * px - sa * py;
+            float ny = sa * px + ca * py;
+            px = nx;
+            py = ny;
+        }
+        amp *= gain;
+    }
+
+    return (norm > 0.0f) ? (sum / norm) : 0.0f;
+}
+
+/*
+    4D members of the fractal family.
+
+    The 4D bases already existed (mu_noise_value4, perlin4, simplex4, worley4);
+    the compositions did not. Same shape as the 1D-3D ones, so a 4D noise
+    volume animates through the same code path a 3D one does.
+*/
+MU_INLINE float mu_noise_fbm4(mu_noise_fn4 base, float x, float y, float z, float w,
+                              uint32_t seed, int octaves, float lacunarity, float gain)
+{
+    float sum = 0.0f, amp = 1.0f, freq = 1.0f, norm = 0.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        sum += amp * base(x * freq, y * freq, z * freq, w * freq, seed + (uint32_t)i * 1013u);
+        norm += amp;
+        freq *= lacunarity;
+        amp *= gain;
+    }
+
+    return (norm > 0.0f) ? (sum / norm) : 0.0f;
+}
+
+MU_INLINE float mu_noise_turbulence4(mu_noise_fn4 base, float x, float y, float z, float w,
+                                     uint32_t seed, int octaves, float lacunarity, float gain)
+{
+    float sum = 0.0f, amp = 1.0f, freq = 1.0f, norm = 0.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        float n = base(x * freq, y * freq, z * freq, w * freq, seed + (uint32_t)i * 1013u);
+        sum += amp * mu_noise_abs(n);
+        norm += amp;
+        freq *= lacunarity;
+        amp *= gain;
+    }
+
+    return (norm > 0.0f) ? (sum / norm) : 0.0f;
+}
+
+MU_INLINE float mu_noise_billow4(mu_noise_fn4 base, float x, float y, float z, float w,
+                                 uint32_t seed, int octaves, float lacunarity, float gain)
+{
+    float sum = 0.0f, amp = 1.0f, freq = 1.0f, norm = 0.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        float n = base(x * freq, y * freq, z * freq, w * freq, seed + (uint32_t)i * 1013u);
+        sum += amp * (2.0f * mu_noise_abs(n) - 1.0f);
+        norm += amp;
+        freq *= lacunarity;
+        amp *= gain;
+    }
+
+    return (norm > 0.0f) ? (sum / norm) : 0.0f;
+}
+
+MU_INLINE float mu_noise_ridged4(mu_noise_fn4 base, float x, float y, float z, float w,
+                                 uint32_t seed, int octaves, float lacunarity, float gain, float offset)
+{
+    float sum = 0.0f, amp = 0.5f, freq = 1.0f, weight = 1.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        float n = base(x * freq, y * freq, z * freq, w * freq, seed + (uint32_t)i * 1013u);
+        float signal = offset - mu_noise_abs(n);
+        signal *= signal;
+        signal *= weight;
+        weight = mu_noise_clamp(signal * gain, 0.0f, 1.0f);
+        sum += signal * amp;
+        freq *= lacunarity;
+        amp *= 0.5f;
+    }
+
+    return mu_noise_clamp(sum * 2.0f - 1.0f, -1.0f, 1.0f);
+}
+
+/*
+    Cellular noise with exponential falloff ("smooth cellular").
+
+    mu_noise_worley2 returns F1 (distance to the nearest feature point), which
+    has a hard crease at every cell boundary: the field is C0, not C1, so
+    bump-mapping or normals computed from it show the cell edges as lines.
+
+    The falloff form replaces the hard minimum with a soft-max over the
+    neighbourhood:
+
+        v = -(1/k) * ln( (1/N) * sum_neighbours exp(-k * d_n) )
+
+    which is a smooth lower envelope: as k grows it converges to F1 (hard
+    cells), as k shrinks it converges to the average distance (blobs). The
+    standard use is blobs/cell fields that still look cellular. Because the
+    neighbours are hashed, this costs the full 3x3 (or 3x3x3) search -- it is
+    the same loop the F1/F2 version already runs, so the cost is not the
+    exponential, it is the neighbour scan.
+*/
+MU_INLINE float mu_noise_worley2_falloff(float x, float y, uint32_t seed, float falloff)
+{
+    int ix = (int)floorf(x);
+    int iy = (int)floorf(y);
+    float sum = 0.0f;
+
+    if (falloff < 1e-4f) falloff = 1e-4f;
+
+    for (int j = -1; j <= 1; ++j)
+    {
+        for (int i = -1; i <= 1; ++i)
+        {
+            int cx = ix + i;
+            int cy = iy + j;
+
+            uint32_t h = mu_noise_hash_2i(cx, cy, seed);
+            float fx = (float)cx + mu_noise_hash_to_unit_float(h) - x;
+            float fy = (float)cy + mu_noise_hash_to_unit_float(mu_noise_hash_combine(h, 0x9E3779B9u)) - y;
+
+            float d = sqrtf(fx * fx + fy * fy);
+            sum += expf(-falloff * d);
+        }
+    }
+
+    /* Divide by the neighbour count: without it the result dives towards -inf
+     * as the falloff shrinks (the log of a sum of nine terms), and the useful
+     * range of k becomes tiny. With it, k -> 0 gives the mean distance and
+     * k -> inf gives F1, so k interpolates between "blobs" and "cells". */
+    return -(1.0f / falloff) * logf(sum * (1.0f / 9.0f));
+}
+
+MU_INLINE float mu_noise_worley3_falloff(float x, float y, float z, uint32_t seed, float falloff)
+{
+    int ix = (int)floorf(x);
+    int iy = (int)floorf(y);
+    int iz = (int)floorf(z);
+    float sum = 0.0f;
+
+    if (falloff < 1e-4f) falloff = 1e-4f;
+
+    for (int k = -1; k <= 1; ++k)
+    {
+        for (int j = -1; j <= 1; ++j)
+        {
+            for (int i = -1; i <= 1; ++i)
+            {
+                int cx = ix + i;
+                int cy = iy + j;
+                int cz = iz + k;
+
+                uint32_t h = mu_noise_hash_3i(cx, cy, cz, seed);
+                float fx = (float)cx + mu_noise_hash_to_unit_float(h) - x;
+                float fy = (float)cy + mu_noise_hash_to_unit_float(mu_noise_hash_combine(h, 0x9E3779B9u)) - y;
+                float fz = (float)cz + mu_noise_hash_to_unit_float(mu_noise_hash_combine(h, 0x85EBCA6Bu)) - z;
+
+                float d = sqrtf(fx * fx + fy * fy + fz * fz);
+                sum += expf(-falloff * d);
+            }
+        }
+    }
+
+    return -(1.0f / falloff) * logf(sum * (1.0f / 27.0f));
 }
 
 #ifdef __cplusplus

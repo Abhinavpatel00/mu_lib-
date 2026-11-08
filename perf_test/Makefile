@@ -198,11 +198,53 @@ rogue-bench: bench_roguelike
 bench_roguelike: bench_roguelike.c ../mu/mu_roguelike.h ../mu/mu_bench.h
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_roguelike.c -lm
 
+
+# ---------------------------------------------------------------------------
+# The library has no third-party dependency, and every header stands alone.
+#
+# check_headers.sh fails if any mu/*.h includes cglm/glm, or if a header does
+# not compile as the first include of an empty TU in C99, C11 and C++14. This is
+# the gate that keeps the promise in docs/README.md honest.
+# ---------------------------------------------------------------------------
+headers-test:
+	sh ./check_headers.sh
+
+# ---------------------------------------------------------------------------
+# mu_noise_math.h: correctness gate and per-family cost table.
+#
+# The gate covers range/finiteness, determinism, continuity across lattice
+# cells, analytic derivatives vs central differences, and the identity cases
+# (flow noise at angle 0 == simplex, cell falloff == F1 at high falloff).
+# ---------------------------------------------------------------------------
+noise-test: test_noise
+	./test_noise
+
+test_noise: test_noise.c ../mu/mu_noise_math.h ../mu/mu_math.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_noise.c -lm
+
+# Wants >=21 samples on one pinned core: not part of run-proofs.
+noise-bench: bench_noise
+	taskset -c 0 ./bench_noise --samples=21 --confidence=6
+
+bench_noise: bench_noise.c ../mu/mu_noise_math.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_noise.c -lm
+
+# ---------------------------------------------------------------------------
+# mu_allocators.h: arena / pool / buddy gate. The byte-level owner map is the
+# part that matters: it catches a block handed out twice, in any order.
+# ---------------------------------------------------------------------------
+alloc-test: test_allocators
+	./test_allocators
+
+test_allocators: test_allocators.c ../mu/allocators.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_allocators.c
+
 clean:
 	rm -f $(ORIG_TARGETS) $(ST_PROOFS) $(MT_PROOFS) card_asm_dump.s \
 	      test_math bench_math results_math.csv $(DS_TESTS) bench_intrusive bench_normals bench_wfc \
 	      test_shapes bench_shapes bench_shapes_vs_par test_easing bench_easing bench_easing_vs_par \
-	      test_roguelike bench_roguelike
+	      test_roguelike bench_roguelike test_noise bench_noise test_allocators
 
 .PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals \
-        shapes-test shapes-bench shapes-par easing-test easing-bench easing-par clean
+        shapes-test shapes-bench shapes-par easing-test easing-bench easing-par \
+        headers-test noise-test noise-bench alloc-test clean

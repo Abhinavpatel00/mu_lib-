@@ -136,6 +136,8 @@ typedef struct mu_line_pos
  * Core API
  * ======================================================================== */
 
+MU_BEGIN_EXTERN_C
+
 /* Initialize with VM arena. reserve_bytes = address space to reserve.
  * chunk_bytes = commit granularity. Both rounded to page size. */
 MU_INLINE bool mu_line_array_init(mu_line_array *la, size_t reserve_bytes, size_t chunk_bytes);
@@ -214,8 +216,6 @@ MU_INLINE size_t   mu_line_array_memory_usage(const mu_line_array *la);
 /* ========================================================================
  * Implementation
  * ======================================================================== */
-
-MU_BEGIN_EXTERN_C
 
 /* ---------------------------------------------------------------------------
  * Internal helpers
@@ -481,7 +481,6 @@ MU_INLINE uint32_t mu_line_array_walk(const mu_line_array *la, uint32_t line, ui
     if (k > max) k = max;
 
     uint32_t phys = mu_line_array__meta_idx(la, line);
-    uint32_t gap = la->meta.gap_end - la->meta.gap_start;
 
     /* Contiguous until gap */
     uint32_t first_chunk = (phys + k <= la->meta.gap_start) ? k :

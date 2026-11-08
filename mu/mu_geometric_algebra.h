@@ -50,49 +50,18 @@
         Sphere3:     (u,x,y,z,w)
 
     --------------------------------------------------------------------------
-    CGLM NOTE
+    MATH BACKEND
     --------------------------------------------------------------------------
-    This file is standalone in the sense that it is a single header, but it
-    intentionally uses cglm for low-level vector math (dot/cross/norm/add/sub)
-    to reduce local boilerplate and keep hot-path primitives centralized in one
-    math backend.
+    This header used to require cglm for mu_vec2/mu_vec3/mu_vec4 and for
+    dot/cross/norm. It now uses mu_math.h, which is part of this library: the
+    only thing it ever needed from cglm was the three vector structs and their
+    members, and mu_vec2/mu_vec3/mu_vec4 are those structs. No external include,
+    no CGLM_USE_ANONYMOUS_STRUCT dance, and the types interop with the rest of
+    the library for free.
 */
 
 #include <math.h>
-#include <float.h>
-#include <stdbool.h>
-
-#include "mu_macros.h"
-
-/*
-    cglm exposes vec3s/vec4s members (.x, .y, .z) through anonymous structs.
-    Under strict C99 cglm disables them by default, so ask for them before it
-    is included; without this the header fails to compile in C99 mode.
-*/
-#if !defined(CGLM_USE_ANONYMOUS_STRUCT)
-#  define CGLM_USE_ANONYMOUS_STRUCT 1
-#elif CGLM_USE_ANONYMOUS_STRUCT == 0
-#  error "mu_geometric_algebra.h needs cglm anonymous structs: define CGLM_USE_ANONYMOUS_STRUCT=1"
-#endif
-
-#if defined(MU_GA_CGLM_HEADER)
-#include MU_GA_CGLM_HEADER
-#elif defined(__has_include)
-#if __has_include(<cglm/cglm.h>)
-#include <cglm/cglm.h>
-#include <cglm/struct.h>
-#elif __has_include("../external/cglm/include/cglm/cglm.h")
-#include "../external/cglm/include/cglm/cglm.h"
-#include "../external/cglm/include/cglm/struct.h"
-#elif __has_include("../../external/cglm/include/cglm/cglm.h")
-#include "../../external/cglm/include/cglm/cglm.h"
-#include "../../external/cglm/include/cglm/struct.h"
-#else
-#error "mu_geometric_algebra.h requires cglm. Define MU_GA_CGLM_HEADER to your cglm umbrella header path."
-#endif
-#else
-#error "mu_geometric_algebra.h requires cglm. Compiler lacks __has_include; define MU_GA_CGLM_HEADER first."
-#endif
+#include "mu_math.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -108,31 +77,19 @@ MU_INLINE float mu_ga_abs(float x) { return fabsf(x); }
 MU_INLINE float mu_ga_clamp_eps(float x) { return (mu_ga_abs(x) < 1.0e-8f) ? 0.0f : x; }
 
 /* Constructors keep vector literals valid in both C99 and C++. */
-MU_INLINE vec2s mu_ga_vec2(float x, float y)
+MU_INLINE mu_vec2 mu_ga_vec2(float x, float y)
 {
-    vec2s v;
-    v.raw[0] = x;
-    v.raw[1] = y;
-    return v;
+    return mu_vec2_make(x, y);
 }
 
-MU_INLINE vec3s mu_ga_vec3(float x, float y, float z)
+MU_INLINE mu_vec3 mu_ga_vec3(float x, float y, float z)
 {
-    vec3s v;
-    v.raw[0] = x;
-    v.raw[1] = y;
-    v.raw[2] = z;
-    return v;
+    return mu_vec3_make(x, y, z);
 }
 
-MU_INLINE vec4s mu_ga_vec4(float x, float y, float z, float w)
+MU_INLINE mu_vec4 mu_ga_vec4(float x, float y, float z, float w)
 {
-    vec4s v;
-    v.raw[0] = x;
-    v.raw[1] = y;
-    v.raw[2] = z;
-    v.raw[3] = w;
-    return v;
+    return mu_vec4_make(x, y, z, w);
 }
 
 MU_INLINE void mu_ga_cos_sin_half(float angle, float *c, float *s)
@@ -145,7 +102,7 @@ MU_INLINE void mu_ga_cos_sin_half(float angle, float *c, float *s)
 /* ------------------------------------------------------------------------- */
 /* basic vectors */
 
-MU_INLINE vec3s mu_ga_mat3_mulv(mat3s m, vec3s v)
+MU_INLINE mu_vec3 mu_ga_mat3_mulv(mu_mat3 m, mu_vec3 v)
 {
     return mu_ga_vec3(
         m.col[0].x * v.x + m.col[1].x * v.y + m.col[2].x * v.z,
@@ -154,7 +111,7 @@ MU_INLINE vec3s mu_ga_mat3_mulv(mat3s m, vec3s v)
     );
 }
 
-MU_INLINE vec4s mu_ga_mat4_mulv(mat4s m, vec4s v)
+MU_INLINE mu_vec4 mu_ga_mat4_mulv(mu_mat4 m, mu_vec4 v)
 {
     return mu_ga_vec4(
         m.col[0].x * v.x + m.col[1].x * v.y + m.col[2].x * v.z + m.col[3].x * v.w,
@@ -172,9 +129,9 @@ MU_INLINE vec4s mu_ga_mat4_mulv(mat4s m, vec4s v)
 
    so we can reuse cross-product arithmetic for wedge/antiwedge formulas.
 */
-MU_INLINE vec3s mu_ga_wedge_v3_v3(vec3s a, vec3s b)
+MU_INLINE mu_vec3 mu_ga_wedge_v3_v3(mu_vec3 a, mu_vec3 b)
 {
-    return glms_vec3_cross(a, b);
+    return mu_vec3_cross(a, b);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -190,12 +147,12 @@ MU_INLINE mu_ga_flat_point2 mu_ga_flat_point2_make(float x, float y, float z)
     return p;
 }
 
-MU_INLINE mu_ga_flat_point2 mu_ga_flat_point2_from_point(vec2s p)
+MU_INLINE mu_ga_flat_point2 mu_ga_flat_point2_from_point(mu_vec2 p)
 {
     return mu_ga_flat_point2_make(p.x, p.y, 1.0f);
 }
 
-MU_INLINE mu_ga_flat_point2 mu_ga_flat_point2_from_dir(vec2s v)
+MU_INLINE mu_ga_flat_point2 mu_ga_flat_point2_from_dir(mu_vec2 v)
 {
     return mu_ga_flat_point2_make(v.x, v.y, 0.0f);
 }
@@ -206,12 +163,12 @@ MU_INLINE mu_ga_line2 mu_ga_line2_make(float x, float y, float z)
     return g;
 }
 
-MU_INLINE mu_ga_line2 mu_ga_line2_from_points(vec2s p, vec2s q)
+MU_INLINE mu_ga_line2 mu_ga_line2_from_points(mu_vec2 p, mu_vec2 q)
 {
     return mu_ga_line2_make(p.y - q.y, q.x - p.x, p.x * q.y - p.y * q.x);
 }
 
-MU_INLINE mu_ga_line2 mu_ga_line2_from_point_dir(vec2s p, vec2s v)
+MU_INLINE mu_ga_line2 mu_ga_line2_from_point_dir(mu_vec2 p, mu_vec2 v)
 {
     return mu_ga_line2_make(-v.y, v.x, p.x * v.y - p.y * v.x);
 }
@@ -269,7 +226,7 @@ MU_INLINE mu_ga_line2 mu_ga_line2_antisupport(mu_ga_flat_point2 p)
 }
 
 MU_INLINE float mu_ga_flat_point2_attitude(mu_ga_flat_point2 p) { return p.z; }
-MU_INLINE vec2s mu_ga_line2_attitude(mu_ga_line2 g) { return mu_ga_vec2(g.y, -g.x); }
+MU_INLINE mu_vec2 mu_ga_line2_attitude(mu_ga_line2 g) { return mu_ga_vec2(g.y, -g.x); }
 
 MU_INLINE float mu_ga_flat_point2_squared_bulk_norm(mu_ga_flat_point2 p) { return p.x*p.x + p.y*p.y; }
 MU_INLINE float mu_ga_line2_squared_bulk_norm(mu_ga_line2 g) { return g.z*g.z; }
@@ -296,12 +253,12 @@ MU_INLINE float mu_ga_line2_antidot(mu_ga_line2 a, mu_ga_line2 b)
     return a.x * b.x + a.y * b.y;
 }
 
-MU_INLINE mu_ga_flat_point2 mu_ga_flat_point2_translate(mu_ga_flat_point2 p, vec2s t)
+MU_INLINE mu_ga_flat_point2 mu_ga_flat_point2_translate(mu_ga_flat_point2 p, mu_vec2 t)
 {
     return mu_ga_flat_point2_make(p.x + t.x * p.z, p.y + t.y * p.z, p.z);
 }
 
-MU_INLINE mu_ga_line2 mu_ga_line2_translate(mu_ga_line2 g, vec2s t)
+MU_INLINE mu_ga_line2 mu_ga_line2_translate(mu_ga_line2 g, mu_vec2 t)
 {
     return mu_ga_line2_make(g.x, g.y, g.z - g.x * t.x - g.y * t.y);
 }
@@ -315,12 +272,12 @@ MU_INLINE mu_ga_line2 mu_ga_wedge_flat_point2_flat_point2(mu_ga_flat_point2 p, m
     );
 }
 
-MU_INLINE mu_ga_line2 mu_ga_wedge_point2_point2(vec2s p, vec2s q)
+MU_INLINE mu_ga_line2 mu_ga_wedge_point2_point2(mu_vec2 p, mu_vec2 q)
 {
     return mu_ga_line2_make(p.y - q.y, q.x - p.x, p.x * q.y - p.y * q.x);
 }
 
-MU_INLINE mu_ga_line2 mu_ga_wedge_point2_vec2(vec2s p, vec2s v)
+MU_INLINE mu_ga_line2 mu_ga_wedge_point2_vec2(mu_vec2 p, mu_vec2 v)
 {
     return mu_ga_line2_make(-v.y, v.x, p.x * v.y - p.y * v.x);
 }
@@ -334,7 +291,7 @@ MU_INLINE mu_ga_flat_point2 mu_ga_antiwedge_line2_line2(mu_ga_line2 g, mu_ga_lin
     );
 }
 
-MU_INLINE float mu_ga_antiwedge_point2_line2(vec2s p, mu_ga_line2 g)
+MU_INLINE float mu_ga_antiwedge_point2_line2(mu_vec2 p, mu_ga_line2 g)
 {
     return -(p.x * g.x + p.y * g.y + g.z);
 }
@@ -348,13 +305,13 @@ MU_INLINE float mu_ga_antiwedge_point2_line2(vec2s p, mu_ga_line2 g)
     Here antiwedge(point,line) = -(n.p + c), so
         p_proj = p + n * antiwedge(point,line)
 */
-MU_INLINE vec2s mu_ga_project_point2_line2(vec2s p, mu_ga_line2 g)
+MU_INLINE mu_vec2 mu_ga_project_point2_line2(mu_vec2 p, mu_ga_line2 g)
 {
     float a = mu_ga_antiwedge_point2_line2(p, g);
     return mu_ga_vec2(p.x + g.x * a, p.y + g.y * a);
 }
 
-MU_INLINE mu_ga_line2 mu_ga_antiproject_line2_point2(mu_ga_line2 g, vec2s p)
+MU_INLINE mu_ga_line2 mu_ga_antiproject_line2_point2(mu_ga_line2 g, mu_vec2 p)
 {
     return mu_ga_line2_make(g.x, g.y, -p.x * g.x - p.y * g.y);
 }
@@ -373,7 +330,7 @@ MU_INLINE mu_ga_flat_point3 mu_ga_flat_point3_make(float x, float y, float z, fl
     return p;
 }
 
-MU_INLINE mu_ga_flat_point3 mu_ga_flat_point3_from_point(vec3s p)
+MU_INLINE mu_ga_flat_point3 mu_ga_flat_point3_from_point(mu_vec3 p)
 {
     return mu_ga_flat_point3_make(p.x, p.y, p.z, 1.0f);
 }
@@ -402,7 +359,7 @@ MU_INLINE mu_ga_line3 mu_ga_wedge_flat_point3_flat_point3(mu_ga_flat_point3 p, m
     );
 }
 
-MU_INLINE mu_ga_line3 mu_ga_wedge_point3_point3(vec3s p, vec3s q)
+MU_INLINE mu_ga_line3 mu_ga_wedge_point3_point3(mu_vec3 p, mu_vec3 q)
 {
     return mu_ga_line3_make(
         q.x - p.x,
@@ -414,7 +371,7 @@ MU_INLINE mu_ga_line3 mu_ga_wedge_point3_point3(vec3s p, vec3s q)
     );
 }
 
-MU_INLINE mu_ga_line3 mu_ga_wedge_point3_vec3(vec3s p, vec3s v)
+MU_INLINE mu_ga_line3 mu_ga_wedge_point3_vec3(mu_vec3 p, mu_vec3 v)
 {
     return mu_ga_line3_make(
         v.x, v.y, v.z,
@@ -434,7 +391,7 @@ MU_INLINE mu_ga_plane3 mu_ga_wedge_line3_flat_point3(mu_ga_line3 l, mu_ga_flat_p
     );
 }
 
-MU_INLINE mu_ga_plane3 mu_ga_wedge_line3_point3(mu_ga_line3 l, vec3s p)
+MU_INLINE mu_ga_plane3 mu_ga_wedge_line3_point3(mu_ga_line3 l, mu_vec3 p)
 {
     return mu_ga_plane3_make(
         l.vy * p.z - l.vz * p.y + l.mx,
@@ -444,7 +401,7 @@ MU_INLINE mu_ga_plane3 mu_ga_wedge_line3_point3(mu_ga_line3 l, vec3s p)
     );
 }
 
-MU_INLINE mu_ga_plane3 mu_ga_wedge_line3_vec3(mu_ga_line3 l, vec3s v)
+MU_INLINE mu_ga_plane3 mu_ga_wedge_line3_vec3(mu_ga_line3 l, mu_vec3 v)
 {
     return mu_ga_plane3_make(
         l.vy * v.z - l.vz * v.y,
@@ -489,44 +446,44 @@ MU_INLINE float mu_ga_antiwedge_flat_point3_plane3(mu_ga_flat_point3 p, mu_ga_pl
     return p.x * g.x + p.y * g.y + p.z * g.z + p.w * g.w;
 }
 
-MU_INLINE float mu_ga_antiwedge_point3_plane3(vec3s p, mu_ga_plane3 g)
+MU_INLINE float mu_ga_antiwedge_point3_plane3(mu_vec3 p, mu_ga_plane3 g)
 {
     return p.x * g.x + p.y * g.y + p.z * g.z + g.w;
 }
 
-MU_INLINE float mu_ga_antiwedge_vec3_plane3(vec3s v, mu_ga_plane3 g)
+MU_INLINE float mu_ga_antiwedge_vec3_plane3(mu_vec3 v, mu_ga_plane3 g)
 {
     return v.x * g.x + v.y * g.y + v.z * g.z;
 }
 
-MU_INLINE mu_ga_flat_point3 mu_ga_flat_point3_translate(mu_ga_flat_point3 p, vec3s t)
+MU_INLINE mu_ga_flat_point3 mu_ga_flat_point3_translate(mu_ga_flat_point3 p, mu_vec3 t)
 {
     return mu_ga_flat_point3_make(p.x + t.x * p.w, p.y + t.y * p.w, p.z + t.z * p.w, p.w);
 }
 
-MU_INLINE mu_ga_line3 mu_ga_line3_translate(mu_ga_line3 l, vec3s t)
+MU_INLINE mu_ga_line3 mu_ga_line3_translate(mu_ga_line3 l, mu_vec3 t)
 {
-    vec3s v = mu_ga_vec3(l.vx, l.vy, l.vz);
-    vec3s m = mu_ga_vec3(l.mx, l.my, l.mz);
-    vec3s mm = glms_vec3_add(m, glms_vec3_cross(t, v));
+    mu_vec3 v = mu_ga_vec3(l.vx, l.vy, l.vz);
+    mu_vec3 m = mu_ga_vec3(l.mx, l.my, l.mz);
+    mu_vec3 mm = mu_vec3_add(m, mu_vec3_cross(t, v));
     return mu_ga_line3_make(l.vx, l.vy, l.vz, mm.x, mm.y, mm.z);
 }
 
-MU_INLINE mu_ga_plane3 mu_ga_plane3_translate(mu_ga_plane3 g, vec3s t)
+MU_INLINE mu_ga_plane3 mu_ga_plane3_translate(mu_ga_plane3 g, mu_vec3 t)
 {
     return mu_ga_plane3_make(g.x, g.y, g.z, g.w - g.x * t.x - g.y * t.y - g.z * t.z);
 }
 
-MU_INLINE vec3s mu_ga_project_point3_line3(vec3s p, mu_ga_line3 l)
+MU_INLINE mu_vec3 mu_ga_project_point3_line3(mu_vec3 p, mu_ga_line3 l)
 {
-    vec3s v = mu_ga_vec3(l.vx, l.vy, l.vz);
-    vec3s m = mu_ga_vec3(l.mx, l.my, l.mz);
-    float d = glms_vec3_dot(v, p);
-    vec3s c = glms_vec3_cross(v, m);
+    mu_vec3 v = mu_ga_vec3(l.vx, l.vy, l.vz);
+    mu_vec3 m = mu_ga_vec3(l.mx, l.my, l.mz);
+    float d = mu_vec3_dot(v, p);
+    mu_vec3 c = mu_vec3_cross(v, m);
     return mu_ga_vec3(d * v.x + c.x, d * v.y + c.y, d * v.z + c.z);
 }
 
-MU_INLINE vec3s mu_ga_project_point3_plane3(vec3s p, mu_ga_plane3 g)
+MU_INLINE mu_vec3 mu_ga_project_point3_plane3(mu_vec3 p, mu_ga_plane3 g)
 {
     float dist = mu_ga_antiwedge_point3_plane3(p, g);
     return mu_ga_vec3(p.x - g.x * dist, p.y - g.y * dist, p.z - g.z * dist);
@@ -534,22 +491,22 @@ MU_INLINE vec3s mu_ga_project_point3_plane3(vec3s p, mu_ga_plane3 g)
 
 MU_INLINE mu_ga_line3 mu_ga_project_line3_plane3(mu_ga_line3 l, mu_ga_plane3 g)
 {
-    vec3s n = mu_ga_vec3(g.x, g.y, g.z);
-    vec3s v = mu_ga_vec3(l.vx, l.vy, l.vz);
-    vec3s m = mu_ga_vec3(l.mx, l.my, l.mz);
+    mu_vec3 n = mu_ga_vec3(g.x, g.y, g.z);
+    mu_vec3 v = mu_ga_vec3(l.vx, l.vy, l.vz);
+    mu_vec3 m = mu_ga_vec3(l.mx, l.my, l.mz);
 
-    vec3s vproj = glms_vec3_sub(v, glms_vec3_scale(n, glms_vec3_dot(n, v)));
-    vec3s mproj = glms_vec3_sub(glms_vec3_scale(n, glms_vec3_dot(n, m)), glms_vec3_scale(vproj, g.w));
+    mu_vec3 vproj = mu_vec3_sub(v, mu_vec3_scale(n, mu_vec3_dot(n, v)));
+    mu_vec3 mproj = mu_vec3_sub(mu_vec3_scale(n, mu_vec3_dot(n, m)), mu_vec3_scale(vproj, g.w));
 
     return mu_ga_line3_make(vproj.x, vproj.y, vproj.z, mproj.x, mproj.y, mproj.z);
 }
 
-MU_INLINE mu_ga_line3 mu_ga_antiproject_line3_point3(mu_ga_line3 l, vec3s p)
+MU_INLINE mu_ga_line3 mu_ga_antiproject_line3_point3(mu_ga_line3 l, mu_vec3 p)
 {
     return mu_ga_wedge_point3_vec3(p, mu_ga_vec3(l.vx, l.vy, l.vz));
 }
 
-MU_INLINE mu_ga_plane3 mu_ga_antiproject_plane3_point3(mu_ga_plane3 g, vec3s p)
+MU_INLINE mu_ga_plane3 mu_ga_antiproject_plane3_point3(mu_ga_plane3 g, mu_vec3 p)
 {
     return mu_ga_plane3_make(g.x, g.y, g.z, -(g.x * p.x + g.y * p.y + g.z * p.z));
 }
@@ -575,14 +532,14 @@ MU_INLINE mu_ga_motor2 mu_ga_motor2_unitize(mu_ga_motor2 q)
     return mu_ga_motor2_make(q.x * inv, q.y * inv, q.z * inv, q.w * inv);
 }
 
-MU_INLINE mu_ga_motor2 mu_ga_motor2_make_rotation(float angle, vec2s center)
+MU_INLINE mu_ga_motor2 mu_ga_motor2_make_rotation(float angle, mu_vec2 center)
 {
     float c, s;
     mu_ga_cos_sin_half(angle, &c, &s);
     return mu_ga_motor2_make(center.x * s, center.y * s, s, c);
 }
 
-MU_INLINE mu_ga_motor2 mu_ga_motor2_make_translation(vec2s offset)
+MU_INLINE mu_ga_motor2 mu_ga_motor2_make_translation(mu_vec2 offset)
 {
     return mu_ga_motor2_make(offset.y * -0.5f, offset.x * 0.5f, 0.0f, 1.0f);
 }
@@ -597,7 +554,7 @@ MU_INLINE mu_ga_motor2 mu_ga_motor2_mul(mu_ga_motor2 a, mu_ga_motor2 b)
     );
 }
 
-MU_INLINE mat3s mu_ga_motor2_to_xform(mu_ga_motor2 q)
+MU_INLINE mu_mat3 mu_ga_motor2_to_xform(mu_ga_motor2 q)
 {
     float m00 = 1.0f - q.z * q.z * 2.0f;
     float m01 = q.z * q.w * -2.0f;
@@ -606,14 +563,14 @@ MU_INLINE mat3s mu_ga_motor2_to_xform(mu_ga_motor2 q)
     float m11 = 1.0f - q.z * q.z * 2.0f;
     float m12 = (q.y * q.z - q.x * q.w) * 2.0f;
 
-    mat3s m;
+    mu_mat3 m;
     m.col[0] = mu_ga_vec3(m00, m10, 0.0f);
     m.col[1] = mu_ga_vec3(m01, m11, 0.0f);
     m.col[2] = mu_ga_vec3(m02, m12, 1.0f);
     return m;
 }
 
-MU_INLINE mat3s mu_ga_motor2_to_inverse_xform(mu_ga_motor2 q)
+MU_INLINE mu_mat3 mu_ga_motor2_to_inverse_xform(mu_ga_motor2 q)
 {
     float m00 = 1.0f - q.z * q.z * 2.0f;
     float m01 = q.z * q.w * 2.0f;
@@ -622,45 +579,45 @@ MU_INLINE mat3s mu_ga_motor2_to_inverse_xform(mu_ga_motor2 q)
     float m11 = 1.0f - q.z * q.z * 2.0f;
     float m12 = (q.y * q.z + q.x * q.w) * 2.0f;
 
-    mat3s m;
+    mu_mat3 m;
     m.col[0] = mu_ga_vec3(m00, m10, 0.0f);
     m.col[1] = mu_ga_vec3(m01, m11, 0.0f);
     m.col[2] = mu_ga_vec3(m02, m12, 1.0f);
     return m;
 }
 
-MU_INLINE vec2s mu_ga_transform_vec2_motor(vec2s v, mu_ga_motor2 q)
+MU_INLINE mu_vec2 mu_ga_transform_vec2_motor(mu_vec2 v, mu_ga_motor2 q)
 {
-    mat3s m = mu_ga_motor2_to_xform(q);
-    vec3s r = mu_ga_mat3_mulv(m, mu_ga_vec3(v.x, v.y, 0.0f));
+    mu_mat3 m = mu_ga_motor2_to_xform(q);
+    mu_vec3 r = mu_ga_mat3_mulv(m, mu_ga_vec3(v.x, v.y, 0.0f));
     return mu_ga_vec2(r.x, r.y);
 }
 
-MU_INLINE vec2s mu_ga_transform_point2_motor(vec2s p, mu_ga_motor2 q)
+MU_INLINE mu_vec2 mu_ga_transform_point2_motor(mu_vec2 p, mu_ga_motor2 q)
 {
-    mat3s m = mu_ga_motor2_to_xform(q);
-    vec3s r = mu_ga_mat3_mulv(m, mu_ga_vec3(p.x, p.y, 1.0f));
+    mu_mat3 m = mu_ga_motor2_to_xform(q);
+    mu_vec3 r = mu_ga_mat3_mulv(m, mu_ga_vec3(p.x, p.y, 1.0f));
     return mu_ga_vec2(r.x, r.y);
 }
 
 MU_INLINE mu_ga_flat_point2 mu_ga_transform_flat_point2_motor(mu_ga_flat_point2 p, mu_ga_motor2 q)
 {
-    mat3s m = mu_ga_motor2_to_xform(q);
-    vec3s r = mu_ga_mat3_mulv(m, mu_ga_vec3(p.x / p.z, p.y / p.z, 1.0f));
+    mu_mat3 m = mu_ga_motor2_to_xform(q);
+    mu_vec3 r = mu_ga_mat3_mulv(m, mu_ga_vec3(p.x / p.z, p.y / p.z, 1.0f));
     return mu_ga_flat_point2_make(r.x * p.z, r.y * p.z, p.z);
 }
 
 MU_INLINE mu_ga_line2 mu_ga_transform_line2_motor(mu_ga_line2 g, mu_ga_motor2 q)
 {
-    mat3s m = mu_ga_motor2_to_xform(q);
-    vec3s n = mu_ga_mat3_mulv(m, mu_ga_vec3(g.x, g.y, 0.0f));
+    mu_mat3 m = mu_ga_motor2_to_xform(q);
+    mu_vec3 n = mu_ga_mat3_mulv(m, mu_ga_vec3(g.x, g.y, 0.0f));
     float m02 = m.col[2].x;
     float m12 = m.col[2].y;
     float c = g.z - (n.x * m02 + n.y * m12);
     return mu_ga_line2_make(n.x, n.y, c);
 }
 
-MU_INLINE mu_ga_motor2 mu_ga_motor2_set_xform(mat3s M)
+MU_INLINE mu_ga_motor2 mu_ga_motor2_set_xform(mu_mat3 M)
 {
     float m00 = M.col[0].x;
     float m10 = M.col[0].y;
@@ -697,7 +654,7 @@ MU_INLINE mu_ga_flector2 mu_ga_flector2_unitize(mu_ga_flector2 f)
     return mu_ga_flector2_make(f.x * inv, f.y * inv, f.z * inv, f.w * inv);
 }
 
-MU_INLINE mu_ga_flector2 mu_ga_flector2_make_transflection(vec2s offset, mu_ga_line2 line_unit)
+MU_INLINE mu_ga_flector2 mu_ga_flector2_make_transflection(mu_vec2 offset, mu_ga_line2 line_unit)
 {
     return mu_ga_flector2_make(
         line_unit.x,
@@ -707,7 +664,7 @@ MU_INLINE mu_ga_flector2 mu_ga_flector2_make_transflection(vec2s offset, mu_ga_l
     );
 }
 
-MU_INLINE mat3s mu_ga_flector2_to_xform(mu_ga_flector2 f)
+MU_INLINE mu_mat3 mu_ga_flector2_to_xform(mu_ga_flector2 f)
 {
     float m00 = 1.0f - f.x * f.x * 2.0f;
     float m01 = f.x * f.y * -2.0f;
@@ -716,14 +673,14 @@ MU_INLINE mat3s mu_ga_flector2_to_xform(mu_ga_flector2 f)
     float m11 = 1.0f - f.y * f.y * 2.0f;
     float m12 = (f.y * f.z - f.x * f.w) * -2.0f;
 
-    mat3s m;
+    mu_mat3 m;
     m.col[0] = mu_ga_vec3(m00, m10, 0.0f);
     m.col[1] = mu_ga_vec3(m01, m11, 0.0f);
     m.col[2] = mu_ga_vec3(m02, m12, 1.0f);
     return m;
 }
 
-MU_INLINE mat3s mu_ga_flector2_to_inverse_xform(mu_ga_flector2 f)
+MU_INLINE mu_mat3 mu_ga_flector2_to_inverse_xform(mu_ga_flector2 f)
 {
     float m00 = 1.0f - f.x * f.x * 2.0f;
     float m01 = f.x * f.y * -2.0f;
@@ -732,7 +689,7 @@ MU_INLINE mat3s mu_ga_flector2_to_inverse_xform(mu_ga_flector2 f)
     float m11 = 1.0f - f.y * f.y * 2.0f;
     float m12 = (f.y * f.z + f.x * f.w) * -2.0f;
 
-    mat3s m;
+    mu_mat3 m;
     m.col[0] = mu_ga_vec3(m00, m10, 0.0f);
     m.col[1] = mu_ga_vec3(m01, m11, 0.0f);
     m.col[2] = mu_ga_vec3(m02, m12, 1.0f);
@@ -769,30 +726,30 @@ MU_INLINE mu_ga_flector2 mu_ga_motor2_mul_flector2(mu_ga_motor2 a, mu_ga_flector
     );
 }
 
-MU_INLINE vec2s mu_ga_transform_vec2_flector(vec2s v, mu_ga_flector2 f)
+MU_INLINE mu_vec2 mu_ga_transform_vec2_flector(mu_vec2 v, mu_ga_flector2 f)
 {
-    mat3s m = mu_ga_flector2_to_xform(f);
-    vec3s r = mu_ga_mat3_mulv(m, mu_ga_vec3(v.x, v.y, 0.0f));
+    mu_mat3 m = mu_ga_flector2_to_xform(f);
+    mu_vec3 r = mu_ga_mat3_mulv(m, mu_ga_vec3(v.x, v.y, 0.0f));
     return mu_ga_vec2(r.x, r.y);
 }
 
-MU_INLINE vec2s mu_ga_transform_point2_flector(vec2s p, mu_ga_flector2 f)
+MU_INLINE mu_vec2 mu_ga_transform_point2_flector(mu_vec2 p, mu_ga_flector2 f)
 {
-    mat3s m = mu_ga_flector2_to_xform(f);
-    vec3s r = mu_ga_mat3_mulv(m, mu_ga_vec3(p.x, p.y, 1.0f));
+    mu_mat3 m = mu_ga_flector2_to_xform(f);
+    mu_vec3 r = mu_ga_mat3_mulv(m, mu_ga_vec3(p.x, p.y, 1.0f));
     return mu_ga_vec2(r.x, r.y);
 }
 
 MU_INLINE mu_ga_flat_point2 mu_ga_transform_flat_point2_flector(mu_ga_flat_point2 p, mu_ga_flector2 f)
 {
-    vec3s r = mu_ga_mat3_mulv(mu_ga_flector2_to_xform(f), mu_ga_vec3(p.x / p.z, p.y / p.z, 1.0f));
+    mu_vec3 r = mu_ga_mat3_mulv(mu_ga_flector2_to_xform(f), mu_ga_vec3(p.x / p.z, p.y / p.z, 1.0f));
     return mu_ga_flat_point2_make(r.x * p.z, r.y * p.z, p.z);
 }
 
 MU_INLINE mu_ga_line2 mu_ga_transform_line2_flector(mu_ga_line2 g, mu_ga_flector2 f)
 {
-    mat3s m = mu_ga_flector2_to_xform(f);
-    vec3s n = mu_ga_mat3_mulv(m, mu_ga_vec3(g.x, g.y, 0.0f));
+    mu_mat3 m = mu_ga_flector2_to_xform(f);
+    mu_vec3 n = mu_ga_mat3_mulv(m, mu_ga_vec3(g.x, g.y, 0.0f));
     float m02 = m.col[2].x;
     float m12 = m.col[2].y;
     float c = g.z - (n.x * m02 + n.y * m12);
@@ -823,14 +780,14 @@ MU_INLINE mu_ga_motor3 mu_ga_motor3_unitize(mu_ga_motor3 q)
     return mu_ga_motor3_make(q.vx*inv, q.vy*inv, q.vz*inv, q.vw*inv, q.mx*inv, q.my*inv, q.mz*inv, q.mw*inv);
 }
 
-MU_INLINE mu_ga_motor3 mu_ga_motor3_make_rotation(float angle, vec3s axis_unit)
+MU_INLINE mu_ga_motor3 mu_ga_motor3_make_rotation(float angle, mu_vec3 axis_unit)
 {
     float c, s;
     mu_ga_cos_sin_half(angle, &c, &s);
     return mu_ga_motor3_make(axis_unit.x * s, axis_unit.y * s, axis_unit.z * s, c, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
-MU_INLINE mu_ga_motor3 mu_ga_motor3_make_translation(vec3s offset)
+MU_INLINE mu_ga_motor3 mu_ga_motor3_make_translation(mu_vec3 offset)
 {
     return mu_ga_motor3_make(0.0f, 0.0f, 0.0f, 1.0f, offset.x * 0.5f, offset.y * 0.5f, offset.z * 0.5f, 0.0f);
 }
@@ -892,7 +849,7 @@ MU_INLINE mu_ga_motor3 mu_ga_motor3_sqrt(mu_ga_motor3 q)
     Rotation block uses quaternion matrix expansion.
     Translation block comes from dual part coupling.
 */
-MU_INLINE mat4s mu_ga_motor3_to_xform(mu_ga_motor3 q)
+MU_INLINE mu_mat4 mu_ga_motor3_to_xform(mu_ga_motor3 q)
 {
     float vx2 = q.vx * q.vx;
     float vy2 = q.vy * q.vy;
@@ -928,7 +885,7 @@ MU_INLINE mat4s mu_ga_motor3_to_xform(mu_ga_motor3 q)
     float m22 = A22;
     float m23 = (A23 + B23) * 2.0f;
 
-    mat4s m;
+    mu_mat4 m;
     m.col[0] = mu_ga_vec4(m00, m10, m20, 0.0f);
     m.col[1] = mu_ga_vec4(m01, m11, m21, 0.0f);
     m.col[2] = mu_ga_vec4(m02, m12, m22, 0.0f);
@@ -936,7 +893,7 @@ MU_INLINE mat4s mu_ga_motor3_to_xform(mu_ga_motor3 q)
     return m;
 }
 
-MU_INLINE mat4s mu_ga_motor3_to_inverse_xform(mu_ga_motor3 q)
+MU_INLINE mu_mat4 mu_ga_motor3_to_inverse_xform(mu_ga_motor3 q)
 {
     float vx2 = q.vx * q.vx;
     float vy2 = q.vy * q.vy;
@@ -972,16 +929,16 @@ MU_INLINE mat4s mu_ga_motor3_to_inverse_xform(mu_ga_motor3 q)
     float m22 = A22;
     float m23 = (A23 - B23) * 2.0f;
 
-    mat4s m;
+    mu_mat4 m;
     m.col[0] = mu_ga_vec4(m00, m10, m20, 0.0f);
     m.col[1] = mu_ga_vec4(m01, m11, m21, 0.0f);
     m.col[2] = mu_ga_vec4(m02, m12, m22, 0.0f);
     m.col[3] = mu_ga_vec4(m03, m13, m23, 1.0f);
     return m;
 }
-MU_INLINE versors mu_ga_quat_from_mat3(mat3s m)
+MU_INLINE mu_quat mu_ga_quat_from_mat3(mu_mat3 m)
 {
-    versors q;
+    mu_quat q;
     float trace = m.col[0].x + m.col[1].y + m.col[2].z;
 
     if (trace > 0.0f) {
@@ -1012,14 +969,14 @@ MU_INLINE versors mu_ga_quat_from_mat3(mat3s m)
     return q;
 }
 
-MU_INLINE mu_ga_motor3 mu_ga_motor3_set_xform(mat4s M)
+MU_INLINE mu_ga_motor3 mu_ga_motor3_set_xform(mu_mat4 M)
 {
-    mat3s r;
+    mu_mat3 r;
     r.col[0] = mu_ga_vec3(M.col[0].x, M.col[0].y, M.col[0].z);
     r.col[1] = mu_ga_vec3(M.col[1].x, M.col[1].y, M.col[1].z);
     r.col[2] = mu_ga_vec3(M.col[2].x, M.col[2].y, M.col[2].z);
 
-    versors v = mu_ga_quat_from_mat3(r);
+    mu_quat v = mu_ga_quat_from_mat3(r);
 
     float tx = M.col[3].x * 0.5f;
     float ty = M.col[3].y * 0.5f;
@@ -1033,44 +990,44 @@ MU_INLINE mu_ga_motor3 mu_ga_motor3_set_xform(mat4s M)
     return mu_ga_motor3_make(v.x, v.y, v.z, v.w, mx, my, mz, mw);
 }
 
-MU_INLINE vec3s mu_ga_transform_vec3_motor(vec3s v, mu_ga_motor3 q)
+MU_INLINE mu_vec3 mu_ga_transform_vec3_motor(mu_vec3 v, mu_ga_motor3 q)
 {
-    mat4s m = mu_ga_motor3_to_xform(q);
-    vec4s r = mu_ga_mat4_mulv(m, mu_ga_vec4(v.x, v.y, v.z, 0.0f));
+    mu_mat4 m = mu_ga_motor3_to_xform(q);
+    mu_vec4 r = mu_ga_mat4_mulv(m, mu_ga_vec4(v.x, v.y, v.z, 0.0f));
     return mu_ga_vec3(r.x, r.y, r.z);
 }
 
-MU_INLINE vec3s mu_ga_transform_point3_motor(vec3s p, mu_ga_motor3 q)
+MU_INLINE mu_vec3 mu_ga_transform_point3_motor(mu_vec3 p, mu_ga_motor3 q)
 {
-    mat4s m = mu_ga_motor3_to_xform(q);
-    vec4s r = mu_ga_mat4_mulv(m, mu_ga_vec4(p.x, p.y, p.z, 1.0f));
+    mu_mat4 m = mu_ga_motor3_to_xform(q);
+    mu_vec4 r = mu_ga_mat4_mulv(m, mu_ga_vec4(p.x, p.y, p.z, 1.0f));
     return mu_ga_vec3(r.x, r.y, r.z);
 }
 
 MU_INLINE mu_ga_flat_point3 mu_ga_transform_flat_point3_motor(mu_ga_flat_point3 p, mu_ga_motor3 q)
 {
-    vec3s ep = mu_ga_vec3(p.x / p.w, p.y / p.w, p.z / p.w);
-    vec3s tp = mu_ga_transform_point3_motor(ep, q);
+    mu_vec3 ep = mu_ga_vec3(p.x / p.w, p.y / p.w, p.z / p.w);
+    mu_vec3 tp = mu_ga_transform_point3_motor(ep, q);
     return mu_ga_flat_point3_make(tp.x * p.w, tp.y * p.w, tp.z * p.w, p.w);
 }
 
 MU_INLINE mu_ga_line3 mu_ga_transform_line3_motor(mu_ga_line3 l, mu_ga_motor3 q)
 {
-    mat4s m = mu_ga_motor3_to_xform(q);
-    vec4s v4 = mu_ga_mat4_mulv(m, mu_ga_vec4(l.vx, l.vy, l.vz, 0.0f));
-    vec4s mm4 = mu_ga_mat4_mulv(m, mu_ga_vec4(l.mx, l.my, l.mz, 0.0f));
-    vec3s v = mu_ga_vec3(v4.x, v4.y, v4.z);
-    vec3s mm = mu_ga_vec3(mm4.x, mm4.y, mm4.z);
-    vec3s t = mu_ga_vec3(m.col[3].x, m.col[3].y, m.col[3].z);
-    vec3s mp = glms_vec3_add(mm, glms_vec3_cross(t, v));
+    mu_mat4 m = mu_ga_motor3_to_xform(q);
+    mu_vec4 v4 = mu_ga_mat4_mulv(m, mu_ga_vec4(l.vx, l.vy, l.vz, 0.0f));
+    mu_vec4 mm4 = mu_ga_mat4_mulv(m, mu_ga_vec4(l.mx, l.my, l.mz, 0.0f));
+    mu_vec3 v = mu_ga_vec3(v4.x, v4.y, v4.z);
+    mu_vec3 mm = mu_ga_vec3(mm4.x, mm4.y, mm4.z);
+    mu_vec3 t = mu_ga_vec3(m.col[3].x, m.col[3].y, m.col[3].z);
+    mu_vec3 mp = mu_vec3_add(mm, mu_vec3_cross(t, v));
     return mu_ga_line3_make(v.x, v.y, v.z, mp.x, mp.y, mp.z);
 }
 
 MU_INLINE mu_ga_plane3 mu_ga_transform_plane3_motor(mu_ga_plane3 g, mu_ga_motor3 q)
 {
-    mat4s m = mu_ga_motor3_to_xform(q);
-    vec4s n4 = mu_ga_mat4_mulv(m, mu_ga_vec4(g.x, g.y, g.z, 0.0f));
-    vec3s n = mu_ga_vec3(n4.x, n4.y, n4.z);
+    mu_mat4 m = mu_ga_motor3_to_xform(q);
+    mu_vec4 n4 = mu_ga_mat4_mulv(m, mu_ga_vec4(g.x, g.y, g.z, 0.0f));
+    mu_vec3 n = mu_ga_vec3(n4.x, n4.y, n4.z);
     float d = g.w - (n.x * m.col[3].x + n.y * m.col[3].y + n.z * m.col[3].z);
     return mu_ga_plane3_make(n.x, n.y, n.z, d);
 }
@@ -1087,7 +1044,7 @@ MU_INLINE mu_ga_flector3 mu_ga_flector3_unitize(mu_ga_flector3 f)
     return mu_ga_flector3_make(f.px*inv,f.py*inv,f.pz*inv,f.pw*inv,f.gx*inv,f.gy*inv,f.gz*inv,f.gw*inv);
 }
 
-MU_INLINE mu_ga_flector3 mu_ga_flector3_make_transflection(vec3s offset, mu_ga_plane3 plane_unit)
+MU_INLINE mu_ga_flector3 mu_ga_flector3_make_transflection(mu_vec3 offset, mu_ga_plane3 plane_unit)
 {
     return mu_ga_flector3_make(
         (offset.y * plane_unit.z - offset.z * plane_unit.y) * 0.5f,
@@ -1125,7 +1082,7 @@ MU_INLINE mu_ga_flector3 mu_ga_flector3_make_rotoreflection_line(float angle, mu
     );
 }
 
-MU_INLINE mat4s mu_ga_flector3_to_xform(mu_ga_flector3 f)
+MU_INLINE mu_mat4 mu_ga_flector3_to_xform(mu_ga_flector3 f)
 {
     float gx2 = f.gx * f.gx;
     float gy2 = f.gy * f.gy;
@@ -1161,7 +1118,7 @@ MU_INLINE mat4s mu_ga_flector3_to_xform(mu_ga_flector3 f)
     float m22 = A22;
     float m23 = (A23 + B23) * 2.0f;
 
-    mat4s m;
+    mu_mat4 m;
     m.col[0] = mu_ga_vec4(m00, m10, m20, 0.0f);
     m.col[1] = mu_ga_vec4(m01, m11, m21, 0.0f);
     m.col[2] = mu_ga_vec4(m02, m12, m22, 0.0f);
@@ -1169,7 +1126,7 @@ MU_INLINE mat4s mu_ga_flector3_to_xform(mu_ga_flector3 f)
     return m;
 }
 
-MU_INLINE mat4s mu_ga_flector3_to_inverse_xform(mu_ga_flector3 f)
+MU_INLINE mu_mat4 mu_ga_flector3_to_inverse_xform(mu_ga_flector3 f)
 {
     float gx2 = f.gx * f.gx;
     float gy2 = f.gy * f.gy;
@@ -1205,7 +1162,7 @@ MU_INLINE mat4s mu_ga_flector3_to_inverse_xform(mu_ga_flector3 f)
     float m22 = A22;
     float m23 = (A23 - B23) * 2.0f;
 
-    mat4s m;
+    mu_mat4 m;
     m.col[0] = mu_ga_vec4(m00, m10, m20, 0.0f);
     m.col[1] = mu_ga_vec4(m01, m11, m21, 0.0f);
     m.col[2] = mu_ga_vec4(m02, m12, m22, 0.0f);
@@ -1228,44 +1185,44 @@ MU_INLINE mu_ga_motor3 mu_ga_flector3_mul_flector3(mu_ga_flector3 a, mu_ga_flect
     );
 }
 
-MU_INLINE vec3s mu_ga_transform_vec3_flector(vec3s v, mu_ga_flector3 f)
+MU_INLINE mu_vec3 mu_ga_transform_vec3_flector(mu_vec3 v, mu_ga_flector3 f)
 {
-    mat4s m = mu_ga_flector3_to_xform(f);
-    vec4s r = mu_ga_mat4_mulv(m, mu_ga_vec4(v.x, v.y, v.z, 0.0f));
+    mu_mat4 m = mu_ga_flector3_to_xform(f);
+    mu_vec4 r = mu_ga_mat4_mulv(m, mu_ga_vec4(v.x, v.y, v.z, 0.0f));
     return mu_ga_vec3(r.x, r.y, r.z);
 }
 
-MU_INLINE vec3s mu_ga_transform_point3_flector(vec3s p, mu_ga_flector3 f)
+MU_INLINE mu_vec3 mu_ga_transform_point3_flector(mu_vec3 p, mu_ga_flector3 f)
 {
-    mat4s m = mu_ga_flector3_to_xform(f);
-    vec4s r = mu_ga_mat4_mulv(m, mu_ga_vec4(p.x, p.y, p.z, 1.0f));
+    mu_mat4 m = mu_ga_flector3_to_xform(f);
+    mu_vec4 r = mu_ga_mat4_mulv(m, mu_ga_vec4(p.x, p.y, p.z, 1.0f));
     return mu_ga_vec3(r.x, r.y, r.z);
 }
 
 MU_INLINE mu_ga_flat_point3 mu_ga_transform_flat_point3_flector(mu_ga_flat_point3 p, mu_ga_flector3 f)
 {
-    vec3s ep = mu_ga_vec3(p.x / p.w, p.y / p.w, p.z / p.w);
-    vec3s tp = mu_ga_transform_point3_flector(ep, f);
+    mu_vec3 ep = mu_ga_vec3(p.x / p.w, p.y / p.w, p.z / p.w);
+    mu_vec3 tp = mu_ga_transform_point3_flector(ep, f);
     return mu_ga_flat_point3_make(tp.x * p.w, tp.y * p.w, tp.z * p.w, p.w);
 }
 
 MU_INLINE mu_ga_line3 mu_ga_transform_line3_flector(mu_ga_line3 l, mu_ga_flector3 f)
 {
-    mat4s m = mu_ga_flector3_to_xform(f);
-    vec4s v4 = mu_ga_mat4_mulv(m, mu_ga_vec4(l.vx, l.vy, l.vz, 0.0f));
-    vec4s mm4 = mu_ga_mat4_mulv(m, mu_ga_vec4(l.mx, l.my, l.mz, 0.0f));
-    vec3s v = mu_ga_vec3(v4.x, v4.y, v4.z);
-    vec3s mm = mu_ga_vec3(mm4.x, mm4.y, mm4.z);
-    vec3s t = mu_ga_vec3(m.col[3].x, m.col[3].y, m.col[3].z);
-    vec3s mp = glms_vec3_add(mm, glms_vec3_cross(t, v));
+    mu_mat4 m = mu_ga_flector3_to_xform(f);
+    mu_vec4 v4 = mu_ga_mat4_mulv(m, mu_ga_vec4(l.vx, l.vy, l.vz, 0.0f));
+    mu_vec4 mm4 = mu_ga_mat4_mulv(m, mu_ga_vec4(l.mx, l.my, l.mz, 0.0f));
+    mu_vec3 v = mu_ga_vec3(v4.x, v4.y, v4.z);
+    mu_vec3 mm = mu_ga_vec3(mm4.x, mm4.y, mm4.z);
+    mu_vec3 t = mu_ga_vec3(m.col[3].x, m.col[3].y, m.col[3].z);
+    mu_vec3 mp = mu_vec3_add(mm, mu_vec3_cross(t, v));
     return mu_ga_line3_make(v.x, v.y, v.z, mp.x, mp.y, mp.z);
 }
 
 MU_INLINE mu_ga_plane3 mu_ga_transform_plane3_flector(mu_ga_plane3 g, mu_ga_flector3 f)
 {
-    mat4s m = mu_ga_flector3_to_xform(f);
-    vec4s n4 = mu_ga_mat4_mulv(m, mu_ga_vec4(g.x, g.y, g.z, 0.0f));
-    vec3s n = mu_ga_vec3(n4.x, n4.y, n4.z);
+    mu_mat4 m = mu_ga_flector3_to_xform(f);
+    mu_vec4 n4 = mu_ga_mat4_mulv(m, mu_ga_vec4(g.x, g.y, g.z, 0.0f));
+    mu_vec3 n = mu_ga_vec3(n4.x, n4.y, n4.z);
     float d = g.w - (n.x * m.col[3].x + n.y * m.col[3].y + n.z * m.col[3].z);
     return mu_ga_plane3_make(n.x, n.y, n.z, d);
 }
@@ -1284,7 +1241,7 @@ MU_INLINE mu_ga_round_point2 mu_ga_round_point2_make(float x, float y, float z, 
     return a;
 }
 
-MU_INLINE mu_ga_round_point2 mu_ga_round_point2_from_point(vec2s p)
+MU_INLINE mu_ga_round_point2 mu_ga_round_point2_from_point(mu_vec2 p)
 {
     return mu_ga_round_point2_make(p.x, p.y, 1.0f, (p.x * p.x + p.y * p.y) * 0.5f);
 }
@@ -1413,7 +1370,7 @@ MU_INLINE mu_ga_line2 mu_ga_wedge_flat_point2_round_point2(mu_ga_flat_point2 p, 
     );
 }
 
-MU_INLINE mu_ga_line2 mu_ga_wedge_point2_round_point2(vec2s p, mu_ga_round_point2 a)
+MU_INLINE mu_ga_line2 mu_ga_wedge_point2_round_point2(mu_vec2 p, mu_ga_round_point2 a)
 {
     return mu_ga_line2_make(
         p.y * a.z - a.y,
@@ -1482,7 +1439,7 @@ MU_INLINE mu_ga_round_point2 mu_ga_antiwedge_circle2_flat_point2(mu_ga_circle2 c
     return mu_ga_round_point2_make(c.w * p.x, c.w * p.y, c.w * p.z, -c.x * p.x - c.y * p.y - c.z * p.z);
 }
 
-MU_INLINE mu_ga_round_point2 mu_ga_antiwedge_circle2_point2(mu_ga_circle2 c, vec2s p)
+MU_INLINE mu_ga_round_point2 mu_ga_antiwedge_circle2_point2(mu_ga_circle2 c, mu_vec2 p)
 {
     return mu_ga_round_point2_make(c.w * p.x, c.w * p.y, c.w, -c.x * p.x - c.y * p.y - c.z);
 }
@@ -1502,7 +1459,7 @@ MU_INLINE mu_ga_round_point3 mu_ga_round_point3_make(float x, float y, float z, 
     return a;
 }
 
-MU_INLINE mu_ga_round_point3 mu_ga_round_point3_from_point(vec3s p)
+MU_INLINE mu_ga_round_point3 mu_ga_round_point3_from_point(mu_vec3 p)
 {
     return mu_ga_round_point3_make(p.x, p.y, p.z, 1.0f, (p.x*p.x + p.y*p.y + p.z*p.z) * 0.5f);
 }
@@ -1663,7 +1620,7 @@ MU_INLINE mu_ga_line3 mu_ga_wedge_flat_point3_round_point3(mu_ga_flat_point3 p, 
     );
 }
 
-MU_INLINE mu_ga_line3 mu_ga_wedge_point3_round_point3(vec3s p, mu_ga_round_point3 a)
+MU_INLINE mu_ga_line3 mu_ga_wedge_point3_round_point3(mu_vec3 p, mu_ga_round_point3 a)
 {
     return mu_ga_line3_make(
         p.x*a.w - a.x,
@@ -1713,7 +1670,7 @@ MU_INLINE mu_ga_plane3 mu_ga_wedge_dipole3_flat_point3(mu_ga_dipole3 d, mu_ga_fl
     );
 }
 
-MU_INLINE mu_ga_plane3 mu_ga_wedge_dipole3_point3(mu_ga_dipole3 d, vec3s p)
+MU_INLINE mu_ga_plane3 mu_ga_wedge_dipole3_point3(mu_ga_dipole3 d, mu_vec3 p)
 {
     return mu_ga_plane3_make(
         d.vy*p.z - d.vz*p.y + d.mx,
@@ -1872,7 +1829,7 @@ MU_INLINE mu_ga_round_point3 mu_ga_antiwedge_sphere3_flat_point3(mu_ga_sphere3 s
     return mu_ga_round_point3_make(s.u*p.x, s.u*p.y, s.u*p.z, s.u*p.w, -s.x*p.x - s.y*p.y - s.z*p.z - s.w*p.w);
 }
 
-MU_INLINE mu_ga_round_point3 mu_ga_antiwedge_sphere3_point3(mu_ga_sphere3 s, vec3s p)
+MU_INLINE mu_ga_round_point3 mu_ga_antiwedge_sphere3_point3(mu_ga_sphere3 s, mu_vec3 p)
 {
     return mu_ga_round_point3_make(s.u*p.x, s.u*p.y, s.u*p.z, s.u, -s.x*p.x - s.y*p.y - s.z*p.z - s.w);
 }
@@ -1884,23 +1841,23 @@ MU_INLINE mu_ga_round_point3 mu_ga_antiwedge_sphere3_point3(mu_ga_sphere3 s, vec
 /*
     Example A: rigid 3D line from two points and projection
 
-        vec3s p0 = mu_ga_vec3(0.0f, 0.0f, 0.0f);
-        vec3s p1 = mu_ga_vec3(1.0f, 1.0f, 0.0f);
+        mu_vec3 p0 = mu_ga_vec3(0.0f, 0.0f, 0.0f);
+        mu_vec3 p1 = mu_ga_vec3(1.0f, 1.0f, 0.0f);
         mu_ga_line3 l = mu_ga_wedge_point3_point3(p0, p1);
 
-        vec3s q = mu_ga_vec3(0.4f, 2.0f, 0.0f);
-        vec3s pr = mu_ga_project_point3_line3(q, mu_ga_line3_make(
+        mu_vec3 q = mu_ga_vec3(0.4f, 2.0f, 0.0f);
+        mu_vec3 pr = mu_ga_project_point3_line3(q, mu_ga_line3_make(
                               l.vx, l.vy, l.vz, l.mx, l.my, l.mz));
 
     Example B: 3D motor transform (rotation + translation)
 
-        vec3s axis = mu_ga_vec3(0.0f, 0.0f, 1.0f);
+        mu_vec3 axis = mu_ga_vec3(0.0f, 0.0f, 1.0f);
         mu_ga_motor3 R = mu_ga_motor3_make_rotation(1.0f, axis);
         mu_ga_motor3 T = mu_ga_motor3_make_translation(mu_ga_vec3(3.0f, 0.0f, 0.0f));
         mu_ga_motor3 Q = mu_ga_motor3_mul(T, R);
 
-        vec3s p = mu_ga_vec3(1.0f, 0.0f, 0.0f);
-        vec3s p2 = mu_ga_transform_point3_motor(p, Q);
+        mu_vec3 p = mu_ga_vec3(1.0f, 0.0f, 0.0f);
+        mu_vec3 p2 = mu_ga_transform_point3_motor(p, Q);
 
     Example C: conformal meet (sphere ^ plane -> circle)
 

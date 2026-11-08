@@ -2,8 +2,8 @@
 
 A self-contained grid-game toolkit: RNG, grids, map generation, field of
 view, pathfinding, and a tick scheduler. All `static inline`
-(`MU_ROG_INLINE`), C99, malloc-overridable (`MU_ROG_MALLOC`...). Uses cglm
-when available (`MU_ROG_HAS_CGLM`) for vector helpers.
+(`MU_ROG_INLINE`), C99, malloc-overridable (`MU_ROG_MALLOC`...), and no
+external math dependency: the vector helpers are local.
 
 ## What changed, and what will break
 

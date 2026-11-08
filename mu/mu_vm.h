@@ -2,6 +2,13 @@
 #ifndef MU_VM_H
 #define MU_VM_H
 
+/* POSIX feature test: clock_gettime / mkstemp / mmap are hidden behind
+ * -std=c99 unless asked for, and the define has to come before any system
+ * header. Ask only if the user has not chosen already. */
+#if !defined(_POSIX_C_SOURCE) && !defined(_DEFAULT_SOURCE) && !defined(__cplusplus) && !defined(_WIN32)
+#  define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "mu_common.h"
 
 /* ---------------------------------------------------------------------------

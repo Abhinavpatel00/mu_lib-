@@ -10,7 +10,8 @@
 	1) Practical helpers you can call from gameplay code immediately.
 	2) Keep ownership explicit (you pass buffers, or use small init/free APIs).
 	3) Explain the algorithm math visually in comments near each function.
-	4) Use cglm (when available) for basic vector math helpers.
+	4) No external math dependency: all vector math is local, so the header
+	   compiles with nothing but the C standard library.
 
 	What is included:
 	- RNG (xoroshiro128+) + weighted choices + dice notation parser.
@@ -51,7 +52,6 @@
 	Usage:
 	  - Include this header.
 	  - Optionally define MU_ASSERT/MALLOC/FREE to route memory.
-	  - Optionally define MU_ROG_CGLM_HEADER before include if cglm path custom.
 
 	---------------------------------------------------------------------------
 */
@@ -73,30 +73,6 @@ extern "C" {
 /* ------------------------------------------------------------------------- */
 /* Config                                                                    */
 /* ------------------------------------------------------------------------- */
-
-/* ------------------------------------------------------------------------- */
-/* cglm detection (optional, used for simple vector math helpers)            */
-/* ------------------------------------------------------------------------- */
-
-#if defined(MU_ROG_CGLM_HEADER)
-#include MU_ROG_CGLM_HEADER
-#define MU_ROG_HAS_CGLM 1
-#elif defined(__has_include)
-#if __has_include(<cglm/cglm.h>)
-#include <cglm/cglm.h>
-#define MU_ROG_HAS_CGLM 1
-#elif __has_include("../external/cglm/include/cglm/cglm.h")
-#include "../external/cglm/include/cglm/cglm.h"
-#define MU_ROG_HAS_CGLM 1
-#elif __has_include("../../external/cglm/include/cglm/cglm.h")
-#include "../../external/cglm/include/cglm/cglm.h"
-#define MU_ROG_HAS_CGLM 1
-#else
-#define MU_ROG_HAS_CGLM 0
-#endif
-#else
-#define MU_ROG_HAS_CGLM 0
-#endif
 
 /* ------------------------------------------------------------------------- */
 /* Basic types                                                               */
@@ -158,15 +134,9 @@ MU_INLINE int mu_rog_grid_index(int x, int y, int w)
 
 MU_INLINE float mu_rog_euclidean2f(float x0, float y0, float x1, float y1)
 {
-#if MU_ROG_HAS_CGLM
-	vec2 a = {x0, y0};
-	vec2 b = {x1, y1};
-	return glm_vec2_distance(a, b);
-#else
 	float dx = x1 - x0;
 	float dy = y1 - y0;
 	return sqrtf(dx * dx + dy * dy);
-#endif
 }
 
 MU_INLINE int mu_rog_chebyshev(int dx, int dy)

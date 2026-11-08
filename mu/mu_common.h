@@ -11,6 +11,9 @@
  * historical convenience (mu_perf uses printf).
  */
 
+/* The POSIX feature-test macro is defined in mu_macros.h, which every header
+ * includes before its first system header. */
+
 #include "mu_macros.h"
 #include <stdio.h>
 
