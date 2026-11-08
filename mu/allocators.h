@@ -71,7 +71,8 @@ typedef struct mu_buddy {
 	uint32_t num_levels; /* level 0 = root */
 
 	uint32_t* free_head; /* array [num_levels], head indices or 0xFFFFFFFF */
-	uint32_t* free_next; /* array [num_blocks], singly-linked free list nodes */
+	uint32_t* free_next; /* array [num_blocks], free list next links */
+	uint32_t* free_prev; /* array [num_blocks], free list prev links (O(1) unlink) */
 
 	uint8_t* split_map;     /* bitset for internal nodes */
 	uint8_t* merge_xor_map; /* bitset for buddy pair xor */
@@ -100,6 +101,9 @@ void  mu_buddy_free(mu_buddy* b, void* ptr);
 
 /* ----------- Linear Arena ----------- */
 
+/* Alignment is applied to the *offset*, so `base` must itself be aligned to the
+ * largest `align` you intend to ask for (any malloc'd or static buffer is fine
+ * up to 16 on the usual ABIs; over-align the buffer for more). */
 void* mu_arena_alloc(mu_arena* a, uint32_t size, uint32_t align) {
 	if (!a || !a->base || size == 0u) return NULL;
 	if (align == 0u) align = 1u;
@@ -228,8 +232,15 @@ MU_INLINE uint32_t mu_buddy_index(uint32_t block_index) {
 	return (block_index & 1u) ? (block_index + 1u) : (block_index - 1u);
 }
 
+/* Doubly linked: coalescing has to remove a *specific* block (the sibling) from
+ * a list it is in the middle of, so a singly linked list would mean an O(n)
+ * scan on every free that merges. With free_prev the unlink is O(1) and so is
+ * the whole free path. Costs one uint32 per block of metadata. */
 MU_INLINE void mu_free_list_push(mu_buddy* b, uint32_t level, uint32_t block_index) {
-	b->free_next[block_index] = b->free_head[level];
+	uint32_t head = b->free_head[level];
+	b->free_next[block_index] = head;
+	b->free_prev[block_index] = 0xFFFFFFFFu;
+	if (head != 0xFFFFFFFFu) b->free_prev[head] = block_index;
 	b->free_head[level] = block_index;
 }
 
@@ -237,8 +248,20 @@ MU_INLINE uint32_t mu_free_list_pop(mu_buddy* b, uint32_t level) {
 	uint32_t head = b->free_head[level];
 	if (head == 0xFFFFFFFFu) return 0xFFFFFFFFu;
 	b->free_head[level] = b->free_next[head];
+	if (b->free_head[level] != 0xFFFFFFFFu) b->free_prev[b->free_head[level]] = 0xFFFFFFFFu;
 	b->free_next[head] = 0xFFFFFFFFu;
+	b->free_prev[head] = 0xFFFFFFFFu;
 	return head;
+}
+
+MU_INLINE void mu_free_list_unlink(mu_buddy* b, uint32_t level, uint32_t block_index) {
+	uint32_t prev = b->free_prev[block_index];
+	uint32_t next = b->free_next[block_index];
+	if (prev != 0xFFFFFFFFu) b->free_next[prev] = next;
+	else b->free_head[level] = next;
+	if (next != 0xFFFFFFFFu) b->free_prev[next] = prev;
+	b->free_next[block_index] = 0xFFFFFFFFu;
+	b->free_prev[block_index] = 0xFFFFFFFFu;
 }
 
 uint32_t mu_buddy_metadata_size(uint32_t total_size, uint32_t leaf_size) {
@@ -250,7 +273,7 @@ uint32_t mu_buddy_metadata_size(uint32_t total_size, uint32_t leaf_size) {
 	uint32_t num_blocks = mu_buddy_num_blocks(levels);
 	uint32_t num_internal = mu_buddy_num_internal(levels);
 	uint32_t free_head_bytes = levels * sizeof(uint32_t);
-	uint32_t free_next_bytes = num_blocks * sizeof(uint32_t);
+	uint32_t free_next_bytes = num_blocks * sizeof(uint32_t) * 2u;
 	uint32_t split_bytes = mu_bitset_bytes(num_internal);
 	uint32_t xor_bytes = mu_bitset_bytes(num_blocks / 2u);
 	return free_head_bytes + free_next_bytes + split_bytes + xor_bytes;
@@ -281,6 +304,8 @@ int mu_buddy_init(mu_buddy* b,
 	uint32_t num_blocks = mu_buddy_num_blocks(levels);
 	b->free_next = (uint32_t*)meta;
 	meta += num_blocks * sizeof(uint32_t);
+	b->free_prev = (uint32_t*)meta;
+	meta += num_blocks * sizeof(uint32_t);
 
 	uint32_t num_internal = mu_buddy_num_internal(levels);
 	b->split_map = (uint8_t*)meta;
@@ -289,7 +314,10 @@ int mu_buddy_init(mu_buddy* b,
 	b->merge_xor_map = (uint8_t*)meta;
 
 	for (uint32_t i = 0u; i < levels; ++i) b->free_head[i] = 0xFFFFFFFFu;
-	for (uint32_t i = 0u; i < num_blocks; ++i) b->free_next[i] = 0xFFFFFFFFu;
+	for (uint32_t i = 0u; i < num_blocks; ++i) {
+		b->free_next[i] = 0xFFFFFFFFu;
+		b->free_prev[i] = 0xFFFFFFFFu;
+	}
 	MU_MEMSET(b->split_map, 0, mu_bitset_bytes(num_internal));
 	MU_MEMSET(b->merge_xor_map, 0, mu_bitset_bytes(num_blocks / 2u));
 
@@ -298,27 +326,35 @@ int mu_buddy_init(mu_buddy* b,
 	return 1;
 }
 
-MU_INLINE uint32_t mu_buddy_split_to_level(mu_buddy* b, uint32_t level) {
-	if (level == 0u) return 0xFFFFFFFFu;
-	if (b->free_head[level - 1u] == 0xFFFFFFFFu) {
-		uint32_t parent = mu_buddy_split_to_level(b, level - 1u);
-		if (parent == 0xFFFFFFFFu) return 0xFFFFFFFFu;
-		(void)parent;
-	}
-
-	uint32_t block = mu_free_list_pop(b, level - 1u);
-	if (block == 0xFFFFFFFFu) return 0xFFFFFFFFu;
-
-	uint32_t left = mu_left_child(block);
-	uint32_t right = mu_right_child(block);
-
-	mu_bit_set(b->split_map, block, 1u);
-	mu_free_list_push(b, level, right);
-	mu_free_list_push(b, level, left);
-
-	return block;
+/* Sibling pairs are (2i+1, 2i+2); their shared id is the parent index i. */
+MU_INLINE uint32_t mu_buddy_pair(uint32_t block_index) {
+	return mu_parent_index(block_index);
 }
 
+MU_INLINE uint8_t* mu_buddy_ptr_at(mu_buddy* b, uint32_t level, uint32_t block_index) {
+	uint32_t index_in_level = mu_index_in_level(b, level, block_index);
+	return b->base + (size_t)index_in_level * (size_t)mu_level_block_size(b, level);
+}
+
+/* INVARIANT (merge_xor_map): bit(pair) == 1 exactly when *one* of the two
+ * siblings sits in that level's free list. It is 0 when both siblings are
+ * allocated or merged into their parent.
+ *
+ * The old code toggled the bit on free and never touched it on alloc, which
+ * only works if blocks are freed in the exact reverse of the allocation order.
+ * Any other order (reuse a freed block, free it again, free a sibling that was
+ * never handed out) left bit == 1 while the sibling was allocated, the merge
+ * then ran anyway, and the parent went on the free list on top of a live
+ * child -- the same bytes came out of two allocations. Maintained from both
+ * sides (set on free-with-allocated-sibling, cleared on alloc and on merge) the
+ * bit is meaningful for any order. A fresh split pushes only the right child
+ * and hands the left one straight to the caller so the invariant also holds
+ * across splitting.
+ *
+ * ALIGNMENT: block starts are multiples of the block size, measured from
+ * `arena`, so an `align` above that only holds if the arena itself is aligned
+ * to it. Same contract as mu_arena_alloc. The request is rounded up to a power
+ * of two at least `align`, so a large `align` costs a large block. */
 void* mu_buddy_alloc(mu_buddy* b, uint32_t size, uint32_t align) {
 	if (!b || size == 0u) return NULL;
 	if (align == 0u) align = 1u;
@@ -331,16 +367,37 @@ void* mu_buddy_alloc(mu_buddy* b, uint32_t size, uint32_t align) {
 	if (need > b->total_size) return NULL;
 
 	uint32_t level = mu_level_of_size(b, need);
-	if (b->free_head[level] == 0xFFFFFFFFu) {
-		if (mu_buddy_split_to_level(b, level) == 0xFFFFFFFFu) return NULL;
+
+	if (b->free_head[level] != 0xFFFFFFFFu) {
+		uint32_t block = mu_free_list_pop(b, level);
+		if (block == 0xFFFFFFFFu) return NULL;
+		/* We just took the one free sibling: neither is free any more. */
+		if (level > 0u) mu_bit_set(b->merge_xor_map, mu_buddy_pair(block), 0u);
+		return mu_buddy_ptr_at(b, level, block);
 	}
 
-	uint32_t block = mu_free_list_pop(b, level);
-	if (block == 0xFFFFFFFFu) return NULL;
+	/* Split down from the nearest ancestor that still has a free block. */
+	uint32_t from = level;
+	while (from > 0u && b->free_head[from] == 0xFFFFFFFFu) --from;
+	if (b->free_head[from] == 0xFFFFFFFFu) return NULL;
 
-	uint32_t index_in_level = mu_index_in_level(b, level, block);
-	uint32_t offset = index_in_level * mu_level_block_size(b, level);
-	return b->base + offset;
+	uint32_t block = mu_free_list_pop(b, from);
+	if (block == 0xFFFFFFFFu) return NULL;
+	/* We are taking the one free sibling of this pair, exactly as in the
+	 * direct-pop path above; without this the pair bit stays 1 and a later free
+	 * of the sibling merges with a block that is now split and in use. */
+	if (from > 0u) mu_bit_set(b->merge_xor_map, mu_buddy_pair(block), 0u);
+
+	while (from < level) {
+		uint32_t left = mu_left_child(block);
+		uint32_t right = mu_right_child(block);
+		mu_bit_set(b->split_map, block, 1u);
+		mu_free_list_push(b, from + 1u, right);
+		mu_bit_set(b->merge_xor_map, block, 1u); /* right is free, left is handed down */
+		block = left;
+		++from;
+	}
+	return mu_buddy_ptr_at(b, level, block);
 }
 
 MU_INLINE uint32_t mu_buddy_level_from_ptr(mu_buddy* b, void* ptr) {
@@ -359,48 +416,28 @@ MU_INLINE uint32_t mu_buddy_level_from_ptr(mu_buddy* b, void* ptr) {
 	return b->num_levels - 1u;
 }
 
-MU_INLINE void mu_buddy_free_at_level(mu_buddy* b, uint32_t level, uint32_t index_in_level) {
-	uint32_t block = mu_block_index(b, level, index_in_level);
-
-	/* Toggle buddy-pair xor bit for this level. */
-	if (level > 0u) {
-		uint32_t pair = block / 2u;
-		mu_bit_flip(b->merge_xor_map, pair);
-	}
-
+MU_INLINE void mu_buddy_free_at_level(mu_buddy* b, uint32_t level, uint32_t block) {
 	if (level == 0u) {
+		mu_free_list_push(b, 0u, 0u);
+		return;
+	}
+
+	uint32_t pair = mu_buddy_pair(block);
+
+	if (mu_bit_get(b->merge_xor_map, pair) == 0u) {
+		/* Sibling is not free: park this block and record that it now is. */
+		mu_bit_set(b->merge_xor_map, pair, 1u);
 		mu_free_list_push(b, level, block);
 		return;
 	}
 
-	uint32_t buddy = mu_buddy_index(block);
-	uint32_t pair = block / 2u;
-	uint32_t can_merge = (mu_bit_get(b->merge_xor_map, pair) == 0u);
-
-	if (!can_merge) {
-		mu_free_list_push(b, level, block);
-		return;
-	}
-
-	/* Remove buddy from free list by linear scan if needed. */
-	uint32_t prev = 0xFFFFFFFFu;
-	uint32_t cur = b->free_head[level];
-	while (cur != 0xFFFFFFFFu && cur != buddy) {
-		prev = cur;
-		cur = b->free_next[cur];
-	}
-	if (cur == buddy) {
-		if (prev == 0xFFFFFFFFu) b->free_head[level] = b->free_next[cur];
-		else b->free_next[prev] = b->free_next[cur];
-		b->free_next[cur] = 0xFFFFFFFFu;
-	}
-
-	mu_bit_set(b->split_map, mu_parent_index(block), 0u);
+	/* The sibling is free and sits in this level's list: unlink it, then merge. */
+	mu_free_list_unlink(b, level, mu_buddy_index(block));
+	mu_bit_set(b->merge_xor_map, pair, 0u);
 
 	uint32_t parent = mu_parent_index(block);
-	uint32_t parent_level = level - 1u;
-	uint32_t parent_index_in_level = mu_index_in_level(b, parent_level, parent);
-	mu_buddy_free_at_level(b, parent_level, parent_index_in_level);
+	mu_bit_set(b->split_map, parent, 0u);
+	mu_buddy_free_at_level(b, level - 1u, parent);
 }
 
 void mu_buddy_free_known(mu_buddy* b, void* ptr, uint32_t size) {
@@ -415,7 +452,7 @@ void mu_buddy_free_known(mu_buddy* b, void* ptr, uint32_t size) {
 	uint32_t offset = (uint32_t)((uint8_t*)ptr - b->base);
 	uint32_t index_in_level = offset / block_size;
 
-	mu_buddy_free_at_level(b, level, index_in_level);
+	mu_buddy_free_at_level(b, level, mu_block_index(b, level, index_in_level));
 }
 
 void mu_buddy_free(mu_buddy* b, void* ptr) {
@@ -425,7 +462,7 @@ void mu_buddy_free(mu_buddy* b, void* ptr) {
 	uint32_t offset = (uint32_t)((uint8_t*)ptr - b->base);
 	uint32_t index_in_level = offset / block_size;
 
-	mu_buddy_free_at_level(b, level, index_in_level);
+	mu_buddy_free_at_level(b, level, mu_block_index(b, level, index_in_level));
 }
 
 #endif /* MU_ALLOCATORS_IMPLEMENTATION */
