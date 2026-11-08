@@ -8,7 +8,6 @@
  *
  * WHAT THIS IS
  * ------------
- * par_shapes.h (prideout/par) is the reference: a single header that can make
  * a sphere, a cube, a torus, a Klein bottle and a trefoil knot, then weld,
  * merge, transform, invert and export the result as OBJ. It is 19 KB of dead
  * simple code and it is very good at what it does. This header keeps that API
