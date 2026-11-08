@@ -291,7 +291,50 @@ clean:
 	      test_shapes bench_shapes bench_shapes_vs_par test_easing bench_easing bench_easing_vs_par \
 	      test_roguelike bench_roguelike test_noise bench_noise test_allocators \
       bench_allocators bench_allocators_big test_time bench_time \
-      test_offset test_offset_lookahead bench_offset bench_offset_ff bench_offset_la
+      test_offset test_offset_lookahead bench_offset bench_offset_ff bench_offset_la \
+      test_fixed test_fixed_nolibm test_fixed_o0 test_fixed_o2 test_fixed_o3 bench_fixed
+
+# ---- fixed point (mu/mu_fixed.h) ------------------------------------------
+# Three gates for three different claims: correctness/accuracy, "no libm" (a
+# link with no -lm and no <math.h>), and determinism (the same digest of every
+# output at three optimization levels).
+
+fixed-test: test_fixed
+	./test_fixed
+
+test_fixed: test_fixed.c ../mu/mu_fixed.h ../mu/mu_macros.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_fixed.c -lm
+
+fixed-nolibm: test_fixed_nolibm
+	./test_fixed_nolibm
+	@if nm test_fixed_nolibm | grep -qE ' U (sin|cos|atan|sqrt)'; then \
+		echo "FAIL: mu_fixed pulled in a libm trig/sqrt symbol"; exit 1; \
+	else echo "PASSED: no libm symbol references"; fi
+
+test_fixed_nolibm: test_fixed.c ../mu/mu_fixed.h
+	$(CC) $(CFLAGS) $(INCLUDES) -DMU_FIXED_LINK_ONLY -o $@ test_fixed.c
+
+fixed-determinism: test_fixed_o0 test_fixed_o2 test_fixed_o3
+	@h0=`./test_fixed_o0 --hash`; h2=`./test_fixed_o2 --hash`; h3=`./test_fixed_o3 --hash`; \
+	echo "  -O0                $$h0"; echo "  -O2 -march=native  $$h2"; echo "  -O3                $$h3"; \
+	if [ "$$h0" = "$$h2" ] && [ "$$h2" = "$$h3" ]; then \
+		echo "PASSED: identical output at every optimization level"; \
+	else echo "FAILED: optimization changed the result"; exit 1; fi
+
+test_fixed_o0: test_fixed.c ../mu/mu_fixed.h
+	$(CC) -O0 -std=c11 $(INCLUDES) -o $@ test_fixed.c -lm
+
+test_fixed_o2: test_fixed.c ../mu/mu_fixed.h
+	$(CC) -O2 -march=native -std=c11 $(INCLUDES) -o $@ test_fixed.c -lm
+
+test_fixed_o3: test_fixed.c ../mu/mu_fixed.h
+	$(CC) -O3 -std=c11 $(INCLUDES) -o $@ test_fixed.c -lm
+
+fixed-bench: bench_fixed
+	./bench_fixed --samples=61
+
+bench_fixed: bench_fixed.c ../mu/mu_fixed.h ../mu/mu_bench.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ bench_fixed.c -lm
 
 # ---- offset allocator (mu/mu_offset_allocator.{h,c}) ----------------------
 # The gate is built with -DDEBUG so oa_debug_validate() is live and the library
@@ -330,5 +373,6 @@ offset-ab:
 
 .PHONY: all run-proofs run-mt-proofs math-test math-bench ds-test wfc-test wfc-bench bench-intrusive bench-normals \
         offset-test offset-test-la offset-bench offset-ab \
+        fixed-test fixed-nolibm fixed-determinism fixed-bench \
         shapes-test shapes-bench shapes-par easing-test easing-bench easing-par \
         headers-test noise-test noise-bench alloc-test alloc-bench alloc-bench-big clean

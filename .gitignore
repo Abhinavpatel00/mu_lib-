@@ -33,6 +33,12 @@ tags
 /perf_test/bench_offset
 /perf_test/bench_offset_ff
 /perf_test/bench_offset_la
+/perf_test/test_fixed
+/perf_test/test_fixed_nolibm
+/perf_test/test_fixed_o0
+/perf_test/test_fixed_o2
+/perf_test/test_fixed_o3
+/perf_test/bench_fixed
 /perf_test/bench_allocators
 /perf_test/bench_allocators_big
 /perf_test/test_time
