@@ -112,7 +112,7 @@
 #include <float.h>
 
 #include "mu_macros.h"
-#include "mu_math.h"
+#include "mu_math_legacy.h"
 #include "mu_pcg.h"        /* seeded RNG for stochastic L-system grammars */
 
 MU_BEGIN_EXTERN_C

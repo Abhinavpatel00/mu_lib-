@@ -49,7 +49,7 @@
 #include <time.h>
 #include <stdint.h>
 
-#include "mu_math.h"
+#include "mu_math_legacy.h"
 #include "cglm/cglm.h"
 
 #define REPS     21

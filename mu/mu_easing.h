@@ -108,7 +108,7 @@
  */
 
 #include "mu_macros.h"
-#include "mu_math.h"
+#include "mu_math_legacy.h"
 #include "mu_simd.h"
 
 #include <math.h>

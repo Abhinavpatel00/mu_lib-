@@ -14,7 +14,7 @@
  */
 
 #include "mu_bench.h"          /* first: sets _POSIX_C_SOURCE */
-#include "mu_math.h"
+#include "mu_math_legacy.h"
 
 #include <math.h>
 

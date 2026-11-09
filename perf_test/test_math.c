@@ -17,7 +17,7 @@
 #include <string.h>
 #include <math.h>
 
-#include "mu_math.h"
+#include "mu_math_legacy.h"
 
 /* cglm's public API is `glm_*`, and its types are byte-compatible with ours. */
 #include "cglm/cglm.h"

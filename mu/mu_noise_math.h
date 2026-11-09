@@ -149,7 +149,7 @@ extern "C" {
 #endif
 
 #include "mu_macros.h"
-#include "mu_math.h"   /* mu_vec2/3/4, mu_vec*_dot/add/sub/scale: one math layer */
+#include "mu_math_legacy.h"   /* mu_vec2/3/4, mu_vec*_dot/add/sub/scale: one math layer */
 
 /* ------------------------------------------------------------------------- */
 /* Basic structs and enums                                                   */

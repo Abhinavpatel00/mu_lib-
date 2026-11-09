@@ -61,7 +61,7 @@
 */
 
 #include <math.h>
-#include "mu_math.h"
+#include "mu_math_legacy.h"
 
 #ifdef __cplusplus
 extern "C" {
