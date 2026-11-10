@@ -49,7 +49,8 @@
 #include <time.h>
 #include <stdint.h>
 
-#include "mu_math_legacy.h"
+#include "mu_macros.h"
+#include "mu_math.h"
 #include "cglm/cglm.h"
 
 #define REPS     21
@@ -313,35 +314,43 @@ static float frand(float lo, float hi)
     return lo + (hi - lo) * ((float)(rng_state & 0xFFFFFF) / 16777215.0f);
 }
 
-static mu_mat4 rand_general(void)
+static void rand_general(mu_mat4 out)
 {
-    mu_mat4 m;
     int i, j;
 
     for (j = 0; j < 4; ++j)
         for (i = 0; i < 4; ++i)
-            (&m.col[j].x)[i] = frand(-2.0f, 2.0f);
-    return m;
+            out[4 * j + i] = frand(-2.0f, 2.0f);
 }
 
-static mu_mat4 rand_rigid(void)
+static void rand_rigid(mu_mat4 out)
 {
-    return mu_mat4_trs(mu_vec3_make(frand(-9, 9), frand(-9, 9), frand(-9, 9)),
-                       mu_quat_axis_angle(mu_vec3_normalize(mu_vec3_make(frand(-1, 1), frand(-1, 1), frand(-1, 1))),
-                                          frand(-3.0f, 3.0f)),
-                       mu_vec3_splat(1.0f));
+    mu_vec3 translation;
+    mu_vec3 axis;
+    mu_quat rotation;
+    mu_vec3 scale;
+
+    mu_vec3_make(translation, frand(-9, 9), frand(-9, 9), frand(-9, 9));
+    mu_vec3_make(axis, frand(-1, 1), frand(-1, 1), frand(-1, 1));
+    mu_vec3_normalize(axis, axis);
+    mu_quat_axis_angle(rotation, axis, frand(-3.0f, 3.0f));
+    mu_vec3_splat(scale, 1.0f);
+    mu_mat4_trs(out, translation, rotation, scale);
 }
 
-static mu_mat4 rand_scaled(void)
+static void rand_scaled(mu_mat4 out)
 {
-    mu_mat4 m;
-    mu_vec3 ax;
+    mu_vec3 translation;
+    mu_vec3 axis;
+    mu_quat rotation;
+    mu_vec3 scale;
 
-    ax = mu_vec3_normalize(mu_vec3_make(frand(-1, 1), frand(-1, 1), frand(-1, 1)));
-    m  = mu_mat4_trs(mu_vec3_make(frand(-9, 9), frand(-9, 9), frand(-9, 9)),
-                     mu_quat_axis_angle(ax, frand(-3.0f, 3.0f)),
-                     mu_vec3_make(frand(0.5f, 2.0f), frand(0.5f, 2.0f), frand(0.5f, 2.0f)));
-    return m;
+    mu_vec3_make(axis, frand(-1, 1), frand(-1, 1), frand(-1, 1));
+    mu_vec3_normalize(axis, axis);
+    mu_vec3_make(translation, frand(-9, 9), frand(-9, 9), frand(-9, 9));
+    mu_quat_axis_angle(rotation, axis, frand(-3.0f, 3.0f));
+    mu_vec3_make(scale, frand(0.5f, 2.0f), frand(0.5f, 2.0f), frand(0.5f, 2.0f));
+    mu_mat4_trs(out, translation, rotation, scale);
 }
 
 static void *bag_new(void)
@@ -381,22 +390,39 @@ static void *bag_new(void)
 
     for (i = 0; i < NMAT; ++i)
     {
-        b->mats_general[i] = rand_general();
-        b->mats_rigid[i]   = rand_rigid();
-        b->mats_scaled[i]  = rand_scaled();
-        b->m3[i]           = mu_mat3_from_mat4_linear(&b->mats_scaled[i]);
-        if (fabsf(mu_mat4_determinant(&b->mats_general[i])) < 0.2f)
-            b->mats_general[i] = mu_mat4_identity();   /* keep it invertible */
+        rand_general(b->mats_general[i]);
+        rand_rigid(b->mats_rigid[i]);
+        rand_scaled(b->mats_scaled[i]);
+        mu_mat4_identity(b->mats_general[i]);   /* keep it invertible */
+        mu_mat3 linear;
+        mu_mat3_from_mat4_linear(linear, b->mats_scaled[i]);
+        memcpy(b->m3[i], linear, sizeof(b->m3[i]));
     }
     for (i = 0; i < NVEC; ++i)
     {
-        b->v3a[i] = mu_vec3_make(frand(-4, 4), frand(-4, 4), frand(-4, 4));
-        b->v3b[i] = mu_vec3_make(frand(-4, 4), frand(-4, 4), frand(-4, 4));
+        mu_vec3 v0;
+        mu_vec3_make(v0, frand(-4, 4), frand(-4, 4), frand(-4, 4));
+        memcpy(b->v3a[i], v0, sizeof(b->v3a[i]));
+        mu_vec3 v1;
+        mu_vec3_make(v1, frand(-4, 4), frand(-4, 4), frand(-4, 4));
+        memcpy(b->v3b[i], v1, sizeof(b->v3b[i]));
     }
     for (i = 0; i < NQUAT; ++i)
     {
-        b->qa[i] = mu_quat_axis_angle(mu_vec3_normalize(mu_vec3_make(frand(-1, 1), frand(-1, 1), frand(-1, 1))), frand(-3, 3));
-        b->qb[i] = mu_quat_axis_angle(mu_vec3_normalize(mu_vec3_make(frand(-1, 1), frand(-1, 1), frand(-1, 1))), frand(-3, 3));
+        mu_vec3 v2;
+        mu_vec3_make(v2, frand(-1, 1), frand(-1, 1), frand(-1, 1));
+        mu_vec3 normalized0;
+        mu_vec3_normalize(normalized0, v2);
+        mu_quat quat0;
+        mu_quat_axis_angle(quat0, normalized0, frand(-3, 3));
+        memcpy(b->qa[i], quat0, sizeof(b->qa[i]));
+        mu_vec3 v3;
+        mu_vec3_make(v3, frand(-1, 1), frand(-1, 1), frand(-1, 1));
+        mu_vec3 normalized1;
+        mu_vec3_normalize(normalized1, v3);
+        mu_quat quat1;
+        mu_quat_axis_angle(quat1, normalized1, frand(-3, 3));
+        memcpy(b->qb[i], quat1, sizeof(b->qb[i]));
     }
 
     for (i = 0; i < NBIG; ++i)
@@ -405,7 +431,9 @@ static void *bag_new(void)
 
         x = frand(-100, 100); y = frand(-100, 100); z = frand(-100, 100);
         b->bx[i] = x; b->by[i] = y; b->bz[i] = z;
-        b->apts[i] = mu_vec3_make(x, y, z);
+        mu_vec3 v4;
+        mu_vec3_make(v4, x, y, z);
+        memcpy(b->apts[i], v4, sizeof(b->apts[i]));
     }
     for (i = 0; i < NSMALL; ++i)
     {
@@ -416,20 +444,24 @@ static void *bag_new(void)
     }
     for (i = 0; i < NBONES; ++i)
     {
-        b->ba[i] = rand_general();
-        b->bb[i] = rand_general();
+        rand_general(b->ba[i]);
+        rand_general(b->bb[i]);
     }
 
-    b->m  = rand_scaled();
-    b->mh = mu_mat4_make_hot(&b->m);
+    rand_scaled(b->m);
+    b->mh = mu_mat4_make_hot(b->m);
 
     {
         mu_mat4 proj, view, vp;
 
-        proj = mu_mat4_perspective(mu_radians(60.0f), 1.777f, 0.1f, 200.0f);
-        view = mu_mat4_look_at(mu_vec3_make(0, 0, 10), mu_vec3_make(0, 0, 0), mu_vec3_make(0, 1, 0));
-        mu_mat4_mul(&proj, &view, &vp);
-        b->frustum = mu_frustum_from_view_proj(&vp);
+        mu_mat4_perspective(proj, mu_radians(60.0f), 1.777f, 0.1f, 200.0f);
+        const mu_vec3 eye = {0.0f, 0.0f, 10.0f};
+        const mu_vec3 target = {0.0f, 0.0f, 0.0f};
+        const mu_vec3 up = {0.0f, 1.0f, 0.0f};
+
+        mu_mat4_look_at(view, eye, target, up);
+        mu_mat4_mul(proj, view, vp);
+        mu_frustum_from_view_proj(&b->frustum, vp);
     }
     return b;
 }
@@ -445,7 +477,7 @@ static double base_vec3_dot(void *a)
     int i;
 
     for (i = 0; i < NVEC; ++i)
-        acc += glm_vec3_dot((float *)&b->v3a[i], (float *)&b->v3b[i]);
+        acc += glm_vec3_dot((float *)b->v3a[i], (float *)b->v3b[i]);
     SINK(acc);
     return (double)acc;
 }
@@ -471,7 +503,7 @@ static double base_vec3_cross(void *a)
 
     for (i = 0; i < NVEC; ++i)
     {
-        glm_vec3_cross((float *)&b->v3a[i], (float *)&b->v3b[i], d);
+        glm_vec3_cross((float *)b->v3a[i], (float *)b->v3b[i], d);
         acc += d[0];
     }
     SINK(acc);
@@ -486,8 +518,9 @@ static double opt_vec3_cross(void *a)
 
     for (i = 0; i < NVEC; ++i)
     {
-        mu_vec3 d = mu_vec3_cross(b->v3a[i], b->v3b[i]);
-        acc += d.x;
+        mu_vec3 d;
+        mu_vec3_cross(d, b->v3a[i], b->v3b[i]);
+        acc += d[0];
     }
     SINK(acc);
     return (double)acc;
@@ -502,7 +535,7 @@ static double base_vec3_normalize(void *a)
 
     for (i = 0; i < NVEC; ++i)
     {
-        glm_vec3_normalize_to((float *)&b->v3a[i], d);
+        glm_vec3_normalize_to((float *)b->v3a[i], d);
         acc += d[0];
     }
     SINK(acc);
@@ -517,8 +550,9 @@ static double opt_vec3_normalize(void *a)
 
     for (i = 0; i < NVEC; ++i)
     {
-        mu_vec3 d = mu_vec3_normalize(b->v3a[i]);
-        acc += d.x;
+        mu_vec3 d;
+        mu_vec3_normalize(d, b->v3a[i]);
+        acc += d[0];
     }
     SINK(acc);
     return (double)acc;
@@ -532,8 +566,9 @@ static double opt_vec3_normalize_fast(void *a)
 
     for (i = 0; i < NVEC; ++i)
     {
-        mu_vec3 d = mu_vec3_normalize_fast(b->v3a[i]);
-        acc += d.x;
+        mu_vec3 d;
+        mu_vec3_normalize_fast(d, b->v3a[i]);
+        acc += d[0];
     }
     SINK(acc);
     return (double)acc;
@@ -548,7 +583,7 @@ static double base_vec3_add(void *a)
 
     for (i = 0; i < NVEC; ++i)
     {
-        glm_vec3_add((float *)&b->v3a[i], (float *)&b->v3b[i], d);
+        glm_vec3_add((float *)b->v3a[i], (float *)b->v3b[i], d);
         acc += d[0];
     }
     SINK(acc);
@@ -563,8 +598,9 @@ static double opt_vec3_add(void *a)
 
     for (i = 0; i < NVEC; ++i)
     {
-        mu_vec3 d = mu_vec3_add(b->v3a[i], b->v3b[i]);
-        acc += d.x;
+        mu_vec3 d;
+        mu_vec3_add(d, b->v3a[i], b->v3b[i]);
+        acc += d[0];
     }
     SINK(acc);
     return (double)acc;
@@ -583,7 +619,7 @@ static double base_normalize_chain(void *a)
     float acc;
     int   i;
 
-    memcpy(v, &b->v3a[0], sizeof v);
+    memcpy(v, b->v3a[0], sizeof v);
     for (i = 0; i < CHAIN; ++i)
     {
         glm_vec3_normalize(v);
@@ -602,14 +638,14 @@ static double opt_normalize_chain(void *a)
     float   acc;
     int     i;
 
-    v = b->v3a[0];
+    memcpy(v, b->v3a[0], sizeof(v));
     for (i = 0; i < CHAIN; ++i)
     {
-        v = mu_vec3_normalize(v);
-        v = mu_vec3_scale(v, 0.99f);
-        v.x += 1e-3f;
+        mu_vec3_normalize(v, v);
+        mu_vec3_scale(v, v, 0.99f);
+        v[0] += 1e-3f;
     }
-    acc = v.x + v.y + v.z;
+    acc = v[0] + v[1] + v[2];
     SINK(acc);
     return (double)acc;
 }
@@ -621,14 +657,14 @@ static double opt_normalize_fast_chain(void *a)
     float   acc;
     int     i;
 
-    v = b->v3a[0];
+    memcpy(v, b->v3a[0], sizeof(v));
     for (i = 0; i < CHAIN; ++i)
     {
-        v = mu_vec3_normalize_fast(v);
-        v = mu_vec3_scale(v, 0.99f);
-        v.x += 1e-3f;
+        mu_vec3_normalize_fast(v, v);
+        mu_vec3_scale(v, v, 0.99f);
+        v[0] += 1e-3f;
     }
-    acc = v.x + v.y + v.z;
+    acc = v[0] + v[1] + v[2];
     SINK(acc);
     return (double)acc;
 }
@@ -644,8 +680,8 @@ static double base_mat4_mul(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        glm_mat4_mul((float (*)[4])&b->mats_general[i],
-                     (float (*)[4])&b->mats_rigid[i], d);
+        glm_mat4_mul((float (*)[4])b->mats_general[i],
+                     (float (*)[4])b->mats_rigid[i], d);
         acc += d[0][0] + d[3][3];
     }
     SINK(acc);
@@ -661,8 +697,8 @@ static double opt_mat4_mul(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        mu_mat4_mul(&b->mats_general[i], &b->mats_rigid[i], &d);
-        acc += d.col[0].x + d.col[3].w;
+        mu_mat4_mul(b->mats_general[i], b->mats_rigid[i], d);
+        acc += d[4 * 0 + 0] + d[4 * 3 + 3];
     }
     SINK(acc);
     return (double)acc;
@@ -677,7 +713,7 @@ static double base_mat4_mul_affine(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        glm_mul((float (*)[4])&b->mats_rigid[i], (float (*)[4])&b->mats_scaled[i], d);
+        glm_mul((float (*)[4])b->mats_rigid[i], (float (*)[4])b->mats_scaled[i], d);
         acc += d[0][0] + d[3][3];
     }
     SINK(acc);
@@ -693,8 +729,8 @@ static double opt_mat4_mul_affine(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        mu_mat4_mul_affine(&b->mats_rigid[i], &b->mats_scaled[i], &d);
-        acc += d.col[0].x + d.col[3].w;
+        mu_mat4_mul_affine(d, b->mats_rigid[i], b->mats_scaled[i]);
+        acc += d[4 * 0 + 0] + d[4 * 3 + 3];
     }
     SINK(acc);
     return (double)acc;
@@ -713,7 +749,7 @@ static double base_mat4_mulv(void *a)
 
     for (i = 0; i < NVEC; ++i)
     {
-        glm_mat4_mulv3((float (*)[4])&b->m, (float *)&b->v3a[i], 1.0f, d);
+        glm_mat4_mulv3((float (*)[4])b->m, (float *)b->v3a[i], 1.0f, d);
         acc += d[0];
     }
     SINK(acc);
@@ -723,14 +759,17 @@ static double base_mat4_mulv(void *a)
 static double opt_mat4_mulv(void *a)
 {
     Bag     *b = (Bag *)a;
-    mu_vec4  v;
     float    acc = 0.0f;
     int      i;
 
     for (i = 0; i < NVEC; ++i)
     {
-        v = mu_vec3_to_vec4(mu_mat4_transform_point(&b->m, b->v3a[i]), 1.0f);
-        acc += v.x;
+        mu_vec3 point;
+        mu_vec4 homogeneous;
+
+        mu_mat4_transform_point(point, b->m, b->v3a[i]);
+        mu_vec3_to_vec4(homogeneous, point, 1.0f);
+        acc += homogeneous[0];
     }
     SINK(acc);
     return (double)acc;
@@ -746,8 +785,9 @@ static double opt_mat4_hot_point(void *a)
 
     for (i = 0; i < NVEC; ++i)
     {
-        mu_vec3 d = mu_mat4_hot_point(&b->mh, b->v3a[i]);
-        acc += d.x;
+        mu_vec3 d;
+        mu_mat4_hot_point(d, &b->mh, b->v3a[i]);
+        acc += d[0];
     }
     SINK(acc);
     return (double)acc;
@@ -762,7 +802,7 @@ static double base_mat4_inverse(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        glm_mat4_inv((float (*)[4])&b->mats_general[i], d);
+        glm_mat4_inv((float (*)[4])b->mats_general[i], d);
         acc += d[0][0];
     }
     SINK(acc);
@@ -778,8 +818,8 @@ static double opt_mat4_inverse(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        mu_mat4_inverse(&b->mats_general[i], &d);
-        acc += d.col[0].x;
+        mu_mat4_inverse(b->mats_general[i], d);
+        acc += d[4 * 0 + 0];
     }
     SINK(acc);
     return (double)acc;
@@ -795,7 +835,7 @@ static double base_inv_tr(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        memcpy(d, &b->mats_rigid[i], sizeof d);
+        memcpy(d, b->mats_rigid[i], sizeof d);
         glm_inv_tr(d);
         acc += d[0][0];
     }
@@ -815,8 +855,8 @@ static double opt_inverse_rigid(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        mu_inverse_rigid(&b->mats_rigid[i], &d);
-        acc += d.col[0].x;
+        mu_inverse_rigid(b->mats_rigid[i], d);
+        acc += d[4 * 0 + 0];
     }
     SINK(acc);
     return (double)acc;
@@ -831,8 +871,8 @@ static double opt_inverse_affine(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        mu_inverse_affine(&b->mats_rigid[i], &d);
-        acc += d.col[0].x;
+        mu_inverse_affine(b->mats_rigid[i], d);
+        acc += d[4 * 0 + 0];
     }
     SINK(acc);
     return (double)acc;
@@ -849,7 +889,7 @@ static double base_inv_general_rigid(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        glm_mat4_inv((float (*)[4])&b->mats_rigid[i], d);
+        glm_mat4_inv((float (*)[4])b->mats_rigid[i], d);
         acc += d[0][0];
     }
     SINK(acc);
@@ -865,7 +905,7 @@ static double base_inv_vs_scaled(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        glm_mat4_inv((float (*)[4])&b->mats_scaled[i], d);
+        glm_mat4_inv((float (*)[4])b->mats_scaled[i], d);
         acc += d[0][0];
     }
     SINK(acc);
@@ -881,8 +921,8 @@ static double opt_inverse_affine_scaled(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        mu_inverse_affine(&b->mats_scaled[i], &d);
-        acc += d.col[0].x;
+        mu_inverse_affine(b->mats_scaled[i], d);
+        acc += d[4 * 0 + 0];
     }
     SINK(acc);
     return (double)acc;
@@ -936,13 +976,15 @@ static double opt_quat_rotate(void *a)
 
     for (i = 0; i < NQUAT; ++i)
     {
-        const mu_vec3 d = mu_quat_rotate_vec3(qa[i],
-                                              mu_vec3_make(xin[i], yin[i], zin[i]));
+        mu_vec3 d;
+        mu_vec3 v;
+        mu_vec3_make(v, xin[i], yin[i], zin[i]);
+        mu_quat_rotate_vec3(d, qa[i], v);
 
-        xo[i] = d.x;
-        yo[i] = d.y;
-        zo[i] = d.z;
-        acc += d.x;
+        xo[i] = d[0];
+        yo[i] = d[1];
+        zo[i] = d[2];
+        acc += d[0];
     }
     SINK(acc);
     return (double)acc;
@@ -957,7 +999,7 @@ static double base_mat4_transpose(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        glm_mat4_transpose_to((float (*)[4])&b->mats_general[i], d);
+        glm_mat4_transpose_to((float (*)[4])b->mats_general[i], d);
         acc += d[0][0];
     }
     SINK(acc);
@@ -973,8 +1015,8 @@ static double opt_mat4_transpose(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        mu_mat4_transpose(&b->mats_general[i], &d);
-        acc += d.col[0].x;
+        mu_mat4_transpose(b->mats_general[i], d);
+        acc += d[4 * 0 + 0];
     }
     SINK(acc);
     return (double)acc;
@@ -989,7 +1031,7 @@ static double base_mat3_inv_transpose(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        glm_mat3_inv((float (*)[3])&b->m3[i], d);
+        glm_mat3_inv((float (*)[3])b->m3[i], d);
         glm_mat3_transpose(d);
         acc += d[0][0];
     }
@@ -1005,8 +1047,9 @@ static double opt_mat3_inv_transpose(void *a)
 
     for (i = 0; i < NMAT; ++i)
     {
-        mu_mat3 d = mu_mat3_inverse_transpose(&b->m3[i]);
-        acc += d.col[0].x;
+        mu_mat3 d;
+        mu_mat3_inverse_transpose(d, b->m3[i]);
+        acc += d[3 * 0 + 0];
     }
     SINK(acc);
     return (double)acc;
@@ -1021,7 +1064,7 @@ static double base_quat_mul(void *a)
 
     for (i = 0; i < NQUAT; ++i)
     {
-        glm_quat_mul((float *)&b->qa[i], (float *)&b->qb[i], d);
+        glm_quat_mul((float *)b->qa[i], (float *)&b->qb[i], d);
         acc += d[0];
     }
     SINK(acc);
@@ -1036,8 +1079,9 @@ static double opt_quat_mul(void *a)
 
     for (i = 0; i < NQUAT; ++i)
     {
-        mu_quat d = mu_quat_mul(b->qa[i], b->qb[i]);
-        acc += d.x;
+        mu_quat d;
+        mu_quat_mul(d, b->qa[i], b->qb[i]);
+        acc += d[0];
     }
     SINK(acc);
     return (double)acc;
@@ -1052,7 +1096,7 @@ static double base_quat_slerp(void *a)
 
     for (i = 0; i < NQUAT; ++i)
     {
-        glm_quat_slerp((float *)&b->qa[i], (float *)&b->qb[i], 0.37f, d);
+        glm_quat_slerp((float *)b->qa[i], (float *)&b->qb[i], 0.37f, d);
         acc += d[0];
     }
     SINK(acc);
@@ -1067,8 +1111,9 @@ static double opt_quat_slerp(void *a)
 
     for (i = 0; i < NQUAT; ++i)
     {
-        mu_quat d = mu_quat_slerp(b->qa[i], b->qb[i], 0.37f);
-        acc += d.x;
+        mu_quat d;
+        mu_quat_slerp(d, b->qa[i], b->qb[i], 0.37f);
+        acc += d[0];
     }
     SINK(acc);
     return (double)acc;
@@ -1083,7 +1128,7 @@ static double base_mat4_from_quat(void *a)
 
     for (i = 0; i < NQUAT; ++i)
     {
-        glm_quat_mat4((float *)&b->qa[i], d);
+        glm_quat_mat4((float *)b->qa[i], d);
         acc += d[0][0];
     }
     SINK(acc);
@@ -1101,8 +1146,10 @@ static double opt_mat4_from_quat_norm(void *a)
 
     for (i = 0; i < NQUAT; ++i)
     {
-        d = mu_mat4_from_quat(mu_quat_normalize(b->qa[i]));
-        acc += d.col[0].x;
+        mu_quat normalized;
+        mu_quat_normalize(normalized, b->qa[i]);
+        mu_mat4_from_quat(d, normalized);
+        acc += d[4 * 0 + 0];
     }
     SINK(acc);
     return (double)acc;
@@ -1117,8 +1164,8 @@ static double opt_mat4_from_quat(void *a)
 
     for (i = 0; i < NQUAT; ++i)
     {
-        d = mu_mat4_from_quat(b->qa[i]);
-        acc += d.col[0].x;
+        mu_mat4_from_quat(d, b->qa[i]);
+        acc += d[4 * 0 + 0];
     }
     SINK(acc);
     return (double)acc;
@@ -1151,8 +1198,8 @@ static double opt_perspective(void *a)
     (void)b;
     for (i = 0; i < 64; ++i)
     {
-        d = mu_mat4_perspective(1.0f + 0.001f * (float)i, 1.777f, 0.1f, 200.0f);
-        acc += d.col[2].w;
+        mu_mat4_perspective(d, 1.0f + 0.001f * (float)i, 1.777f, 0.1f, 200.0f);
+        acc += d[4 * 2 + 3];
     }
     SINK(acc);
     return (double)acc;
@@ -1172,7 +1219,7 @@ static double base_xform_aos(void *a)
 
     for (i = 0; i < NBIG; ++i)
     {
-        glm_mat4_mulv3((float (*)[4])&b->m, (float *)&b->apts[i], 1.0f, out[i]);
+        glm_mat4_mulv3((float (*)[4])b->m, (float *)&b->apts[i], 1.0f, out[i]);
         acc += out[i][0];
     }
     SINK(acc);
@@ -1192,9 +1239,9 @@ static double base_xform_soa_scalar(void *a)
         float x, y, z;
 
         x = b->bx[i]; y = b->by[i]; z = b->bz[i];
-        b->box[i] = b->m.col[0].x * x + b->m.col[1].x * y + b->m.col[2].x * z + b->m.col[3].x;
-        b->boy[i] = b->m.col[0].y * x + b->m.col[1].y * y + b->m.col[2].y * z + b->m.col[3].y;
-        b->boz[i] = b->m.col[0].z * x + b->m.col[1].z * y + b->m.col[2].z * z + b->m.col[3].z;
+        b->box[i] = b->m[4 * 0 + 0] * x + b->m[4 * 1 + 0] * y + b->m[4 * 2 + 0] * z + b->m[4 * 3 + 0];
+        b->boy[i] = b->m[4 * 0 + 1] * x + b->m[4 * 1 + 1] * y + b->m[4 * 2 + 1] * z + b->m[4 * 3 + 1];
+        b->boz[i] = b->m[4 * 0 + 2] * x + b->m[4 * 1 + 2] * y + b->m[4 * 2 + 2] * z + b->m[4 * 3 + 2];
         acc += b->box[i];
     }
     SINK(acc);
@@ -1206,7 +1253,7 @@ static double opt_xform_soa(void *a)
     Bag *b = (Bag *)a;
     float acc;
 
-    mu_xform_points3_soa(&b->m, b->bx, b->by, b->bz, b->box, b->boy, b->boz, NBIG);
+    mu_xform_points3_soa(b->m, b->bx, b->by, b->bz, b->box, b->boy, b->boz, NBIG);
     acc = b->box[0] + b->box[NBIG - 1] + b->boz[NBIG / 2];
     SINK(acc);
     return (double)acc;
@@ -1226,9 +1273,9 @@ static double base_xform_soa_small(void *a)
         float x, y, z;
 
         x = b->sx[i]; y = b->sy[i]; z = b->sz[i];
-        b->sox[i] = b->m.col[0].x * x + b->m.col[1].x * y + b->m.col[2].x * z + b->m.col[3].x;
-        b->soy[i] = b->m.col[0].y * x + b->m.col[1].y * y + b->m.col[2].y * z + b->m.col[3].y;
-        b->soz[i] = b->m.col[0].z * x + b->m.col[1].z * y + b->m.col[2].z * z + b->m.col[3].z;
+        b->sox[i] = b->m[4 * 0 + 0] * x + b->m[4 * 1 + 0] * y + b->m[4 * 2 + 0] * z + b->m[4 * 3 + 0];
+        b->soy[i] = b->m[4 * 0 + 1] * x + b->m[4 * 1 + 1] * y + b->m[4 * 2 + 1] * z + b->m[4 * 3 + 1];
+        b->soz[i] = b->m[4 * 0 + 2] * x + b->m[4 * 1 + 2] * y + b->m[4 * 2 + 2] * z + b->m[4 * 3 + 2];
         acc += b->sox[i];
     }
     SINK(acc);
@@ -1242,7 +1289,7 @@ static double opt_xform_soa_small(void *a)
     int   p;
 
     for (p = 0; p < SMALL_PASSES; ++p)
-        mu_xform_points3_soa(&b->m, b->sx, b->sy, b->sz, b->sox, b->soy, b->soz, NSMALL);
+        mu_xform_points3_soa(b->m, b->sx, b->sy, b->sz, b->sox, b->soy, b->soz, NSMALL);
     acc = b->sox[0] + b->sox[NSMALL - 1];
     SINK(acc);
     return (double)acc;
@@ -1296,7 +1343,7 @@ static double base_rotate_1m(void *a)
     float  acc = 0.0f;
     int    i;
 
-    memcpy(cq, &b->qa[0], sizeof cq);
+    memcpy(cq, b->qa[0], sizeof cq);
     for (i = 0; i < NBIG; ++i)
     {
         cv[0] = b->bx[i]; cv[1] = b->by[i]; cv[2] = b->bz[i];
@@ -1318,12 +1365,15 @@ static double ctrl_rotate_1m(void *a)
 
     for (i = 0; i < NBIG; ++i)
     {
-        const mu_vec3 r = mu_quat_rotate_vec3(b->qa[0], mu_vec3_make(b->bx[i], b->by[i], b->bz[i]));
+        mu_vec3 r;
+        mu_vec3 v;
+        mu_vec3_make(v, b->bx[i], b->by[i], b->bz[i]);
+        mu_quat_rotate_vec3(r, b->qa[0], v);
 
-        b->box[i] = r.x;
-        b->boy[i] = r.y;
-        b->boz[i] = r.z;
-        acc += r.x;
+        b->box[i] = r[0];
+        b->boy[i] = r[1];
+        b->boz[i] = r[2];
+        acc += r[0];
     }
     SINK(acc);
     return (double)acc;
@@ -1352,12 +1402,12 @@ static double base_cull(void *a)
 
     for (i = 0; i < NBIG; ++i)
     {
-        float x = b->apts[i].x, y = b->apts[i].y, z = b->apts[i].z;
+        float x = b->apts[i][0], y = b->apts[i][1], z = b->apts[i][2];
         int   inside = 1;
 
         for (k = 0; k < 6; ++k)
         {
-            const float *p = (const float *)&b->frustum.p[k];
+            const float *p = (const float *)b->frustum.p[k];
 
             if (p[0] * x + p[1] * y + p[2] * z + p[3] < -1.0f) { inside = 0; break; }
         }
@@ -1391,8 +1441,8 @@ static double base_mat4_batch(void *a)
 
     for (i = 0; i < NBONES; ++i)
     {
-        glm_mat4_mul((float (*)[4])&b->ba[i], (float (*)[4])&b->bb[i], (float (*)[4])&b->bd[i]);
-        acc += b->bd[i].col[0].x;
+        glm_mat4_mul((float (*)[4])b->ba[i], (float (*)[4])b->bb[i], (float (*)[4])b->bd[i]);
+        acc += b->bd[i][0];
     }
     SINK(acc);
     return (double)acc;
@@ -1403,9 +1453,9 @@ static double opt_mat4_batch(void *a)
     Bag *b = (Bag *)a;
     float acc;
 
-    mu_mat4_mul_batch(b->ba, sizeof(mu_mat4), b->bb, sizeof(mu_mat4),
-                      b->bd, sizeof(mu_mat4), NBONES);
-    acc = b->bd[0].col[0].x + b->bd[NBONES - 1].col[3].w;
+    mu_mat4_mul_batch(&b->bd[0][0], sizeof(mu_mat4), &b->ba[0][0], sizeof(mu_mat4),
+                      &b->bb[0][0], sizeof(mu_mat4), NBONES);
+    acc = b->bd[0][0] + b->bd[NBONES - 1][12];
     SINK(acc);
     return (double)acc;
 }
@@ -1416,6 +1466,15 @@ static double opt_mat4_batch(void *a)
 static double base_mat4_batch_packed(void *a)
 {
     return base_mat4_batch(a);
+}
+
+/* the packed kernel keeps four matrices in one register; this reads lane 0 of
+ * column 0 back out for the sink without depending on the SIMD type */
+static float mu_mat4x4_col0_lane0(const mu_mat4x4 *p)
+{
+    float m[16];
+    mu_mat4x4_unpack(m, sizeof(mu_mat4), p);
+    return m[0];
 }
 
 static double opt_mat4_batch_packed(void *a)
@@ -1429,13 +1488,13 @@ static double opt_mat4_batch_packed(void *a)
      * baseline too, so the comparison stays honest (both pay it) */
     for (i = 0; i < NBONES / 4; ++i)
     {
-        mu_mat4x4_pack(&b->ba[i * 4], sizeof(mu_mat4), &pack_a[i]);
-        mu_mat4x4_pack(&b->bb[i * 4], sizeof(mu_mat4), &pack_b[i]);
+        mu_mat4x4_pack(&pack_a[i], &b->ba[i * 4][0], sizeof(mu_mat4));
+        mu_mat4x4_pack(&pack_b[i], &b->bb[i * 4][0], sizeof(mu_mat4));
     }
     for (i = 0; i < NBONES / 4; ++i)
-        mu_mat4x4_mul(&pack_a[i], &pack_b[i], &pack_a[i]);
+        mu_mat4x4_mul(&pack_a[i], &pack_a[i], &pack_b[i]);
 
-    acc = (float)i + _mm512_cvtss_f32(pack_a[0].col[0]);
+    acc = (float)i + mu_mat4x4_col0_lane0(&pack_a[0]);
     SINK(acc);
     return (double)acc;
 }
@@ -1447,18 +1506,18 @@ static double opt_mat4_batch_nopack(void *a)
     float    acc;
     int      i;
 
-    if (_mm512_cvtss_f32(pack_a[0].col[0]) == 0.0f)
+    if (mu_mat4x4_col0_lane0(&pack_a[0]) == 0.0f)
     {
         for (i = 0; i < NBONES / 4; ++i)
         {
-            mu_mat4x4_pack(&b->ba[i * 4], sizeof(mu_mat4), &pack_a[i]);
-            mu_mat4x4_pack(&b->bb[i * 4], sizeof(mu_mat4), &pack_b[i]);
+            mu_mat4x4_pack(&pack_a[i], &b->ba[i * 4][0], sizeof(mu_mat4));
+            mu_mat4x4_pack(&pack_b[i], &b->bb[i * 4][0], sizeof(mu_mat4));
         }
     }
     for (i = 0; i < NBONES / 4; ++i)
-        mu_mat4x4_mul(&pack_a[i], &pack_b[i], &pack_a[i]);
+        mu_mat4x4_mul(&pack_a[i], &pack_a[i], &pack_b[i]);
 
-    acc = (float)i + _mm512_cvtss_f32(pack_a[0].col[0]);
+    acc = (float)i + mu_mat4x4_col0_lane0(&pack_a[0]);
     SINK(acc);
     return (double)acc;
 }

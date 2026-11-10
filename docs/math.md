@@ -2,6 +2,62 @@
 
 ---
 
+## One math front end (2026-11)
+
+`mu_math_legacy.h` — the struct-based front end (`v.x`, `mat4.col[0]`, return
+by value) — is **gone**. Every header in `mu/` now builds on the array API of
+`mu_math.h`, so `#include "mu.h"` is no longer order-sensitive and there is one
+way to write a vector in this library:
+
+```c
+mu_vec3 d;                                  /* float[3], not a struct      */
+mu_vec3_sub(d, path[i + 1], path[i]);       /* destination first           */
+float l2 = mu_vec3_length2(d);              /* scalars still return values */
+mu_vec3 p0;  mu_vec3_copy(p0, verts[0].p);  /* copies, not assignment      */
+```
+
+What the migration had to settle, beyond call-site churn:
+
+- **Functions that returned arrays now take an out-parameter.** `mu_vec3_make`,
+  the noise vector helpers (`mu_noise_v3`, `mu_noise_curl3`,
+  `mu_noise_grad3_from_hash`, the domain-warp family) and the GA row
+  (`mu_ga_vec3`, `mu_ga_mat3_mulv`, `mu_ga_*_to_xform`,
+  `mu_ga_quat_from_mat3`, `mu_ga_transform_*`) all became
+  `void f(mu_vec3 out, ...)`. Callbacks that produced a vector
+  (`mu_noise_vfn2/3/4`) gained the same parameter.
+- **`mu_mat3`/`mu_mat4` are flat, column-major arrays.** `m.col[c].x` is
+  `m[3*c]` for mat3 and `m[4*c]` for mat4; writing a column is three or four
+  index assignments, not a struct store.
+- **Matrix benches got the destination as the first argument.**
+  `mu_mat4_mul_affine`, `mu_mat4x4_pack/unpack/mul` and `mu_mat4_mul_batch`
+  were ported into `mu_math.h` with `dst` first; the legacy versions put it
+  last. `mu_mat4_mul`, `mu_mat4_inverse` and `mu_mat4_transpose` keep their
+  existing `dst`-last signatures — check the header, not your memory.
+- **Literals are compound literals where a temporary would be noise.**
+  `mu_noise_v3(a, b, c)` in argument position became `(mu_vec3){a, b, c}`,
+  which is what `mu_shapes.h` already did.
+
+Verification, all against the pre-migration struct-based build:
+
+| check | result |
+|---|---|
+| `perf_test/test_math.c` (vs cglm, every entry point) | **951 407 checks, 0 failures** — identical count, so no test was silently dropped |
+| `perf_test/test_noise.c` | **4 594 checks, 0 failures** |
+| noise digest (25 sampler families × 24×24 lattice, FNV over the floats) | **bit-identical** (`9d3dda2b…`) |
+| `perf_test/test_ga.c` (new: 177 GA entry points, rolling digest) | **177 checks, 0 failures** against digests recorded from the legacy build |
+| `perf_test/test_shapes.c` / `test_easing.c` | 398 / 565 checks, 0 failures |
+| 26-shape geometry digest | **bit-identical** to the previous tree |
+| every header compiled alone, plus `#include "mu.h"` | clean under `-Wall -Wextra -Werror` |
+
+`test_ga.c` is worth a note: it used to be a four-line stub that returned 0, so
+"the GA test passes" proved nothing. It now calls all 177 public functions with
+deterministic inputs and compares rolling FNV digests against the values the
+struct-based implementation produced. Flipping a single sign in the 3D motor
+matrix makes 81 rows fail and names the functions, which is the property that
+made the port safe to do mechanically.
+
+---
+
 ## mu_noise_math.h — procedural noise
 
 Standalone C99/C++ single-header noise library. No allocation, no global
@@ -292,9 +348,9 @@ the `mu.h` umbrella). Link with `-lm` when using the math functions.
 
 ## mu_geometric_algebra.h — PGA / conformal toolkit
 
-Standalone C99 single-header geometric algebra. **Requires cglm** for the
-vector backend (found via `__has_include`, or point `MU_GA_CGLM_HEADER` at
-your umbrella header).
+Standalone C99 single-header geometric algebra. No external dependency: it
+builds on `mu_math.h` (and only uses `mu_vec2/3/4` for plain vectors), so a GA
+value and a math value are the same objects and interop is free.
 
 Design target:
 

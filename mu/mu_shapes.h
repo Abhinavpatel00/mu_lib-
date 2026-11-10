@@ -112,7 +112,7 @@
 #include <float.h>
 
 #include "mu_macros.h"
-#include "mu_math_legacy.h"
+#include "mu_math.h"
 #include "mu_pcg.h"        /* seeded RNG for stochastic L-system grammars */
 
 MU_BEGIN_EXTERN_C
@@ -216,7 +216,7 @@ MU_INLINE int mu_shape_reserve(mu_shape *s, uint32_t npoints, uint32_t ntriangle
 
 /* Push one vertex. Returns its index, or -1 if the allocation failed (the shape
  * is then discarded by mu_shape__finish, so callers may ignore the result). */
-MU_INLINE int mu_shape_add_vertex(mu_shape *s, mu_vec3 p, float u, float v)
+MU_INLINE int mu_shape_add_vertex(mu_shape *s, const mu_vec3 p, float u, float v)
 {
     uint32_t i;
 
@@ -224,9 +224,9 @@ MU_INLINE int mu_shape_add_vertex(mu_shape *s, mu_vec3 p, float u, float v)
     if (!mu_shape__reserve_points(s, s->npoints + 1u)) return -1;
 
     i = s->npoints++;
-    s->verts[i].p = p;
-    s->verts[i].n = mu_vec3_zero();
-    s->verts[i].uv = mu_vec2_make(u, v);
+    mu_vec3_copy(s->verts[i].p, p);
+    memcpy(s->verts[i].n, (mu_vec3){0.0f, 0.0f, 0.0f}, sizeof(s->verts[i].n));
+    memcpy(s->verts[i].uv, (mu_vec2){u, v}, sizeof(s->verts[i].uv));
     return (int)i;
 }
 
@@ -300,11 +300,15 @@ MU_INLINE uint32_t mu_shape_remove_degenerate(mu_shape *s, float min_area);
 MU_INLINE int mu_shape__row_collapsed(const mu_shape *s, uint32_t first, uint32_t n)
 {
     uint32_t k;
-    mu_vec3 p0 = s->verts[first].p;
+    mu_vec3 p0;
+    mu_vec3_copy(p0, s->verts[first].p);
 
-    for (k = 1; k < n; ++k)
-        if (mu_vec3_length2(mu_vec3_sub(s->verts[first + k].p, p0)) > 1e-12f)
+    for (k = 1; k < n; ++k) {
+        mu_vec3 sub;
+        mu_vec3_sub(sub, s->verts[first + k].p, p0);
+        if (mu_vec3_length2(sub) > 1e-12f)
             return 0;
+    }
     return 1;
 }
 
@@ -342,7 +346,7 @@ MU_INLINE int mu_shape__grid_faces(mu_shape *s, uint32_t base, int slices, int s
  * 3. Generic parametric surface
  * ========================================================================== */
 
-typedef mu_vec3 (*mu_shape_fn)(float u, float v, void *user);
+typedef void (*mu_shape_fn)(mu_vec3 out, float u, float v, void *user);
 
 /* Any function of the unit square. The grid has (slices+1)*(stacks+1) points and
  * duplicates the u=1 column — keep that if the surface wraps, because UVs need
@@ -367,7 +371,9 @@ MU_INLINE mu_shape mu_shape_parametric(mu_shape_fn fn, void *user, int slices, i
         for (i = 0; i <= slices; ++i)
         {
             float u = (float)i / (float)slices;
-            mu_shape_add_vertex(&s, fn(u, v, user), u, v);
+            mu_vec3 p;
+            fn(p, u, v, user);
+            mu_shape_add_vertex(&s, p, u, v);
         }
     }
     mu_shape__grid_faces(&s, 0u, slices, stacks);
@@ -399,7 +405,7 @@ MU_INLINE mu_shape mu_shape_plane(int slices, int stacks, float width, float dep
         {
             float u = (float)i / (float)slices;
             mu_shape_add_vertex(&s,
-                mu_vec3_make((u - 0.5f) * width, 0.0f, (0.5f - v) * depth), u, v);
+                (mu_vec3){(u - 0.5f) * width, 0.0f, (0.5f - v) * depth}, u, v);
         }
     }
     mu_shape__grid_faces(&s, 0u, slices, stacks);
@@ -419,7 +425,7 @@ MU_INLINE mu_shape mu_shape_disk(float radius, int slices, int rings)
                           (uint32_t)(slices * (2 * rings - 1))))
         return s;
 
-    mu_shape_add_vertex(&s, mu_vec3_make(0.0f, 0.0f, 0.0f), 0.5f, 0.5f);
+    mu_shape_add_vertex(&s, (mu_vec3){0.0f, 0.0f, 0.0f}, 0.5f, 0.5f);
 
     for (j = 1; j <= rings; ++j)
     {
@@ -429,7 +435,7 @@ MU_INLINE mu_shape mu_shape_disk(float radius, int slices, int rings)
             float a = MU_SHAPE_TAU * (float)i / (float)slices;
             float cu = cosf(a), su = sinf(a);
             mu_shape_add_vertex(&s,
-                mu_vec3_make(r * cu, 0.0f, -r * su),
+                (mu_vec3){r * cu, 0.0f, -r * su},
                 0.5f + 0.5f * cu, 0.5f + 0.5f * su);
         }
     }
@@ -472,7 +478,7 @@ MU_INLINE mu_shape mu_shape_sphere(int slices, int stacks, float radius)
             (uint32_t)(slices * (2 * stacks - 2))))
         return s;
 
-    mu_shape_add_vertex(&s, mu_vec3_make(0.0f, radius, 0.0f), 0.5f, 0.0f);
+    mu_shape_add_vertex(&s, (mu_vec3){0.0f, radius, 0.0f}, 0.5f, 0.0f);
 
     for (j = 1; j < stacks; ++j)
     {
@@ -484,11 +490,10 @@ MU_INLINE mu_shape mu_shape_sphere(int slices, int stacks, float radius)
             float u = (float)i / (float)slices;
             float th = MU_SHAPE_TAU * u;
             mu_shape_add_vertex(&s,
-                mu_vec3_make(radius * sp * cosf(th), radius * cp,
-                             radius * sp * sinf(th)), u, v);
+                (mu_vec3){radius * sp * cosf(th), radius * cp, radius * sp * sinf(th)}, u, v);
         }
     }
-    south = (uint32_t)mu_shape_add_vertex(&s, mu_vec3_make(0.0f, -radius, 0.0f),
+    south = (uint32_t)mu_shape_add_vertex(&s, (mu_vec3){0.0f, -radius, 0.0f},
                                           0.5f, 1.0f);
     ring0 = 1u;
     (void)ring0;
@@ -534,7 +539,7 @@ MU_INLINE mu_shape mu_shape_hemisphere(int slices, int stacks, float radius)
                           (uint32_t)(slices * (2 * stacks - 3))))
         return s;
 
-    mu_shape_add_vertex(&s, mu_vec3_make(0.0f, radius, 0.0f), 0.5f, 0.0f);
+    mu_shape_add_vertex(&s, (mu_vec3){0.0f, radius, 0.0f}, 0.5f, 0.0f);
 
     for (j = 1; j <= stacks; ++j)
     {
@@ -546,8 +551,7 @@ MU_INLINE mu_shape mu_shape_hemisphere(int slices, int stacks, float radius)
             float u = (float)i / (float)slices;
             float th = MU_SHAPE_TAU * u;
             mu_shape_add_vertex(&s,
-                mu_vec3_make(radius * sp * cosf(th), radius * cp,
-                             radius * sp * sinf(th)), u, v);
+                (mu_vec3){radius * sp * cosf(th), radius * cp, radius * sp * sinf(th)}, u, v);
         }
     }
 
@@ -599,7 +603,7 @@ MU_INLINE mu_shape mu_shape_cylinder(int slices, int stacks, float radius, float
             float u = (float)i / (float)slices;
             float a = MU_SHAPE_TAU * u;
             mu_shape_add_vertex(&s,
-                mu_vec3_make(radius * cosf(a), y, radius * sinf(a)), u, v);
+                (mu_vec3){radius * cosf(a), y, radius * sinf(a)}, u, v);
         }
     }
     for (j = 0; j < stacks; ++j)
@@ -615,8 +619,8 @@ MU_INLINE mu_shape mu_shape_cylinder(int slices, int stacks, float radius, float
         }
     }
 
-    top_c = (uint32_t)mu_shape_add_vertex(&s, mu_vec3_make(0.0f, h, 0.0f), 0.5f, 0.5f);
-    bot_c = (uint32_t)mu_shape_add_vertex(&s, mu_vec3_make(0.0f, -h, 0.0f), 0.5f, 0.5f);
+    top_c = (uint32_t)mu_shape_add_vertex(&s, (mu_vec3){0.0f, h, 0.0f}, 0.5f, 0.5f);
+    bot_c = (uint32_t)mu_shape_add_vertex(&s, (mu_vec3){0.0f, -h, 0.0f}, 0.5f, 0.5f);
     ring0 = 0u;
 
     {
@@ -660,7 +664,7 @@ MU_INLINE mu_shape mu_shape_cone(int slices, int stacks, float radius, float hei
             float u = (float)i / (float)slices;
             float a = MU_SHAPE_TAU * u;
             mu_shape_add_vertex(&s,
-                mu_vec3_make(r * cosf(a), y, r * sinf(a)), u, v);
+                (mu_vec3){r * cosf(a), y, r * sinf(a)}, u, v);
         }
     }
     /* row 0 collapses to the apex; only the second triangle of each quad there */
@@ -677,7 +681,7 @@ MU_INLINE mu_shape mu_shape_cone(int slices, int stacks, float radius, float hei
         }
     }
     {
-        uint32_t base_c = (uint32_t)mu_shape_add_vertex(&s, mu_vec3_make(0.0f, -h, 0.0f),
+        uint32_t base_c = (uint32_t)mu_shape_add_vertex(&s, (mu_vec3){0.0f, -h, 0.0f},
                                                         0.5f, 0.5f);
         uint32_t last = (uint32_t)stacks * (uint32_t)(slices + 1);
         for (i = 0; i < slices; ++i)
@@ -710,7 +714,7 @@ MU_INLINE mu_shape mu_shape_capsule(int slices, int stacks, float radius, float 
                           (uint32_t)(slices * 2 * (rings - 2) + 2 * slices)))
         return s;
 
-    north = (uint32_t)mu_shape_add_vertex(&s, mu_vec3_make(0.0f, h + radius, 0.0f),
+    north = (uint32_t)mu_shape_add_vertex(&s, (mu_vec3){0.0f, h + radius, 0.0f},
                                           0.5f, 0.0f);
 
     /* top cap: phi from 0 (pole) to pi/2 (equator), then the straight side */
@@ -741,10 +745,10 @@ MU_INLINE mu_shape mu_shape_capsule(int slices, int stacks, float radius, float 
         {
             float u = (float)i / (float)slices;
             float a = MU_SHAPE_TAU * u;
-            mu_shape_add_vertex(&s, mu_vec3_make(r * cosf(a), y, r * sinf(a)), u, v);
+            mu_shape_add_vertex(&s, (mu_vec3){r * cosf(a), y, r * sinf(a)}, u, v);
         }
     }
-    south = (uint32_t)mu_shape_add_vertex(&s, mu_vec3_make(0.0f, -h - radius, 0.0f),
+    south = (uint32_t)mu_shape_add_vertex(&s, (mu_vec3){0.0f, -h - radius, 0.0f},
                                           0.5f, 1.0f);
 
     for (i = 0; i < slices; ++i)
@@ -800,7 +804,7 @@ MU_INLINE mu_shape mu_shape_torus(int slices, int stacks, float radius_major,
             float ca = cosf(a), sa = sinf(a);
             float r = radius_major + radius_minor * cb;
             mu_shape_add_vertex(&s,
-                mu_vec3_make(r * ca, radius_minor * sb, r * sa), u, v);
+                (mu_vec3){r * ca, radius_minor * sb, r * sa}, u, v);
         }
     }
     mu_shape__grid_faces(&s, 0u, slices, stacks);
@@ -854,11 +858,10 @@ MU_INLINE mu_shape mu_shape_cube(int subdiv, float size)
                 float u = (float)i / (float)subdiv;
                 float a = 2.0f * u - 1.0f;
                 float b = 2.0f * v - 1.0f;
-                mu_vec3 p = mu_vec3_make(
-                    fc[0] + a * fc[3] + b * fc[6],
-                    fc[1] + a * fc[4] + b * fc[7],
-                    fc[2] + a * fc[5] + b * fc[8]);
-                mu_shape_add_vertex(&s, mu_vec3_scale(p, h), u, v);
+                mu_vec3 p = {fc[0] + a * fc[3] + b * fc[6], fc[1] + a * fc[4] + b * fc[7], fc[2] + a * fc[5] + b * fc[8]};
+                mu_vec3 scale;
+                mu_vec3_scale(scale, p, h);
+                mu_shape_add_vertex(&s, scale, u, v);
             }
         }
         for (j = 0; j < subdiv; ++j)
@@ -895,16 +898,17 @@ MU_INLINE mu_shape mu_shape_rounded_box(int subdiv, float size, float radius)
 
     for (i = 0; i < s.npoints; ++i)
     {
-        mu_vec3 p = s.verts[i].p;
-        mu_vec3 q = mu_vec3_make(
-            p.x > inner ? inner : (p.x < -inner ? -inner : p.x),
-            p.y > inner ? inner : (p.y < -inner ? -inner : p.y),
-            p.z > inner ? inner : (p.z < -inner ? -inner : p.z));
-        mu_vec3 d = mu_vec3_sub(p, q);
+        mu_vec3 p;
+        mu_vec3_copy(p, s.verts[i].p);
+        mu_vec3 q = {p[0] > inner ? inner : (p[0] < -inner ? -inner : p[0]), p[1] > inner ? inner : (p[1] < -inner ? -inner : p[1]), p[2] > inner ? inner : (p[2] < -inner ? -inner : p[2])};
+        mu_vec3 d; mu_vec3_sub(d, p, q);
         float len = mu_vec3_length(d);
 
-        if (len > 1e-6f)
-            s.verts[i].p = mu_vec3_add(q, mu_vec3_scale(d, radius / len));
+        if (len > 1e-6f) {
+            mu_vec3 scale1;
+            mu_vec3_scale(scale1, d, radius / len);
+            mu_vec3_add(s.verts[i].p, q, scale1);
+        }
     }
     return s;
 }
@@ -928,8 +932,10 @@ MU_INLINE mu_shape mu_shape_tetrahedron(float radius)
 
     for (i = 0; i < 4; ++i)
     {
-        mu_vec3 p = mu_vec3_normalize(mu_vec3_make(v[i][0], v[i][1], v[i][2]));
-        mu_shape_add_vertex(&s, mu_vec3_scale(p, radius),
+        mu_vec3 p; mu_vec3_normalize(p, (mu_vec3){v[i][0], v[i][1], v[i][2]});
+        mu_vec3 scale2;
+        mu_vec3_scale(scale2, p, radius);
+        mu_shape_add_vertex(&s, scale2,
                             (float)(i & 1), (float)((i >> 1) & 1));
     }
     for (i = 0; i < 4; ++i)
@@ -956,9 +962,11 @@ MU_INLINE mu_shape mu_shape_octahedron(float radius)
 
     if (!mu_shape_reserve(&s, 6u, 8u)) return s;
 
-    for (i = 0; i < 6; ++i)
-        mu_shape_add_vertex(&s, mu_vec3_scale(
-            mu_vec3_make(v[i][0], v[i][1], v[i][2]), radius), 0.5f, 0.5f);
+    for (i = 0; i < 6; ++i) {
+        mu_vec3 scale3;
+        mu_vec3_scale(scale3, (mu_vec3){v[i][0], v[i][1], v[i][2]}, radius);
+        mu_shape_add_vertex(&s, scale3, 0.5f, 0.5f);
+    }
     for (i = 0; i < 8; ++i)
         mu_shape_add_triangle(&s, (uint32_t)f[i][0], (uint32_t)f[i][2],
                               (uint32_t)f[i][1]);
@@ -997,10 +1005,14 @@ MU_INLINE mu_shape mu_shape_icosahedron(float radius)
 
     if (!mu_shape_reserve(&s, 12u, 20u)) return s;
 
-    for (i = 0; i < 12; ++i)
-        mu_shape_add_vertex(&s, mu_vec3_scale(
-            mu_vec3_normalize(mu_vec3_make(v[i][0], v[i][1], v[i][2])), radius),
+    for (i = 0; i < 12; ++i) {
+        mu_vec3 normalize;
+        mu_vec3_normalize(normalize, (mu_vec3){v[i][0], v[i][1], v[i][2]});
+        mu_vec3 scale4;
+        mu_vec3_scale(scale4, normalize, radius);
+        mu_shape_add_vertex(&s, scale4,
             0.5f, 0.5f);
+    }
     for (i = 0; i < 20; ++i)
         mu_shape_add_triangle(&s, (uint32_t)f[i][0], (uint32_t)f[i][1],
                               (uint32_t)f[i][2]);
@@ -1024,12 +1036,17 @@ MU_INLINE mu_shape mu_shape_dodecahedron(float radius)
     /* dodeca vertex = normalised centroid of an icosa face */
     for (f = 0; f < ico.ntriangles; ++f)
     {
-        mu_vec3 c = mu_vec3_zero();
-        for (i = 0; i < 3; ++i)
-            c = mu_vec3_add(c, ico.verts[ico.triangles[3u * f + i]].p);
-        c = mu_vec3_scale(c, 1.0f / 3.0f);
+        mu_vec3 c = {0};
+        for (i = 0; i < 3; ++i) {
+            mu_vec3_add(c, c, ico.verts[ico.triangles[3u * f + i]].p);
+        }
+        mu_vec3_scale(c, c, 1.0f / 3.0f);
+        mu_vec3 normalize1;
+        mu_vec3_normalize(normalize1, c);
+        mu_vec3 scale5;
+        mu_vec3_scale(scale5, normalize1, radius);
         face_vert[f] = (uint32_t)mu_shape_add_vertex(
-            &s, mu_vec3_scale(mu_vec3_normalize(c), radius), 0.5f, 0.5f);
+            &s, scale5, 0.5f, 0.5f);
     }
 
     /* for each icosa vertex, collect its 5 faces in angular order and fan them */
@@ -1038,7 +1055,10 @@ MU_INLINE mu_shape mu_shape_dodecahedron(float radius)
         uint32_t ring[16];
         float    ang[16];
         int      nring = 0;
-        mu_vec3  axis = mu_vec3_normalize(ico.verts[k].p);
+        mu_vec3 normalize2;
+        mu_vec3_normalize(normalize2, ico.verts[k].p);
+        mu_vec3 axis;
+        mu_vec3_copy(axis, normalize2);
         mu_vec3  t0, t1;
         int      a, b;
 
@@ -1050,15 +1070,16 @@ MU_INLINE mu_shape mu_shape_dodecahedron(float radius)
         if (nring < 3) continue;
 
         /* tangent frame at the axis */
-        t0 = mu_vec3_cross(axis, mu_vec3_make(0.0f, 1.0f, 0.0f));
-        if (mu_vec3_length2(t0) < 1e-6f)
-            t0 = mu_vec3_cross(axis, mu_vec3_make(1.0f, 0.0f, 0.0f));
-        t0 = mu_vec3_normalize(t0);
-        t1 = mu_vec3_cross(axis, t0);
+        mu_vec3_cross(t0, axis, (mu_vec3){0.0f, 1.0f, 0.0f});
+        if (mu_vec3_length2(t0) < 1e-6f) {
+            mu_vec3_cross(t0, axis, (mu_vec3){1.0f, 0.0f, 0.0f});
+        }
+        mu_vec3_normalize(t0, t0);
+        mu_vec3_cross(t1, axis, t0);
 
         for (a = 0; a < nring; ++a)
         {
-            mu_vec3 d = mu_vec3_sub(s.verts[face_vert[ring[a]]].p, ico.verts[k].p);
+            mu_vec3 d; mu_vec3_sub(d, s.verts[face_vert[ring[a]]].p, ico.verts[k].p);
             ang[a] = atan2f(mu_vec3_dot(d, t1), mu_vec3_dot(d, t0));
         }
         /* insertion sort by angle: nring is 5 */
@@ -1072,9 +1093,11 @@ MU_INLINE mu_shape mu_shape_dodecahedron(float radius)
 
         /* the face normal must point away from the origin: reverse if not */
         {
-            mu_vec3 n = mu_vec3_cross(
-                mu_vec3_sub(s.verts[face_vert[ring[1]]].p, s.verts[face_vert[ring[0]]].p),
-                mu_vec3_sub(s.verts[face_vert[ring[2]]].p, s.verts[face_vert[ring[0]]].p));
+            mu_vec3 sub1;
+            mu_vec3_sub(sub1, s.verts[face_vert[ring[1]]].p, s.verts[face_vert[ring[0]]].p);
+            mu_vec3 sub2;
+            mu_vec3_sub(sub2, s.verts[face_vert[ring[2]]].p, s.verts[face_vert[ring[0]]].p);
+            mu_vec3 n; mu_vec3_cross(n, sub1, sub2);
             if (mu_vec3_dot(n, axis) < 0.0f)
             {
                 for (a = 0; a < nring / 2; ++a)
@@ -1119,6 +1142,7 @@ MU_INLINE uint32_t mu_shape__hash3(int32_t x, int32_t y, int32_t z, uint32_t mas
 
 /* Applies m to positions and the COFACTOR to normals (AGENTS.md 3.16): a
  * reflection must flip the normal, and inverse-transpose does not. */
+
 MU_INLINE void mu_shape_transform(mu_shape *s, const mu_mat4 *m)
 {
     uint32_t i;
@@ -1126,36 +1150,45 @@ MU_INLINE void mu_shape_transform(mu_shape *s, const mu_mat4 *m)
     if (!s || !m) return;
     for (i = 0; i < s->npoints; ++i)
     {
-        s->verts[i].p = mu_mat4_transform_point(m, s->verts[i].p);
+        mu_mat4_transform_point(s->verts[i].p, *m, s->verts[i].p);
         if (mu_vec3_length2(s->verts[i].n) > 0.0f)
-            s->verts[i].n = mu_vec3_normalize(mu_mat4_normal(m, s->verts[i].n));
+        {
+            mu_vec3 n;
+            mu_mat4_normal(n, *m, s->verts[i].n);
+            mu_vec3_normalize(s->verts[i].n, n);
+        }
     }
 }
+
 
 MU_INLINE void mu_shape_translate(mu_shape *s, mu_vec3 t)
 {
     uint32_t i;
     if (!s) return;
-    for (i = 0; i < s->npoints; ++i) s->verts[i].p = mu_vec3_add(s->verts[i].p, t);
+    for (i = 0; i < s->npoints; ++i)
+        mu_vec3_add(s->verts[i].p, s->verts[i].p, t);
 }
+
 
 MU_INLINE void mu_shape_rotate(mu_shape *s, mu_vec3 axis, float radians)
 {
     mu_mat4 m;
     if (!s) return;
-    m = mu_mat4_rotate(axis, radians);
+    mu_mat4_rotate(m, axis, radians);
     mu_shape_transform(s, &m);
 }
+
 
 MU_INLINE void mu_shape_scale(mu_shape *s, mu_vec3 k)
 {
     mu_mat4 m;
     if (!s) return;
-    m = mu_mat4_scale(k);
+    mu_mat4_scale(m, k);
     mu_shape_transform(s, &m);
 }
 
 /* Reverse winding, i.e. turn the mesh inside out. */
+
 MU_INLINE void mu_shape_flip(mu_shape *s)
 {
     uint32_t i;
@@ -1166,7 +1199,8 @@ MU_INLINE void mu_shape_flip(mu_shape *s)
         s->triangles[3u * i + 1u] = s->triangles[3u * i + 2u];
         s->triangles[3u * i + 2u] = t;
     }
-    for (i = 0; i < s->npoints; ++i) s->verts[i].n = mu_vec3_negate(s->verts[i].n);
+    for (i = 0; i < s->npoints; ++i)
+        mu_vec3_negate(s->verts[i].n, s->verts[i].n);
 }
 
 /* Append src to dst. UVs and normals come along, so scenes are built by
@@ -1260,9 +1294,7 @@ MU_INLINE mu_shape mu_shape_supershape(const mu_shape_superformula *f, int slice
             float u = (float)i / (float)slices;
             float th = MU_SHAPE_TAU * u - MU_SHAPE_PI;
             float r1 = mu_shape__superformula_radius(th, f->m1, f->n11, f->n12, f->n13);
-            mu_vec3 p = mu_vec3_make(radius * r1 * cosf(th) * r2 * cp,
-                                     radius * r2 * sinf(phi),
-                                     radius * r1 * sinf(th) * r2 * cp);
+            mu_vec3 p = {radius * r1 * cosf(th) * r2 * cp, radius * r2 * sinf(phi), radius * r1 * sinf(th) * r2 * cp};
             mu_shape_add_vertex(&s, p, u, v);
         }
     }
@@ -1308,8 +1340,7 @@ MU_INLINE mu_shape mu_shape_seashell(int slices, int stacks, int turns,
             float c = cosf(ang), sn = sinf(ang);
             float ring = r * (1.0f + 0.35f * c);
             mu_shape_add_vertex(&s,
-                mu_vec3_make(ring * cosf(t), 0.25f * a * sn + t * growth * 0.15f * r,
-                             ring * sinf(t)), u, v);
+                (mu_vec3){ring * cosf(t), 0.25f * a * sn + t * growth * 0.15f * r, ring * sinf(t)}, u, v);
         }
     }
     mu_shape__grid_faces(&s, 0u, slices, stacks);
@@ -1345,8 +1376,7 @@ MU_INLINE mu_shape mu_shape_mobius(int slices, int strips, float radius, float w
             float th = MU_SHAPE_TAU * u;
             float ht = 0.5f * th;
             float r = radius + w * cosf(ht);
-            mu_shape_add_vertex(&s, mu_vec3_make(r * cosf(th), w * sinf(ht),
-                                                 r * sinf(th)), u, v);
+            mu_shape_add_vertex(&s, (mu_vec3){r * cosf(th), w * sinf(ht), r * sinf(th)}, u, v);
         }
     }
 
@@ -1404,10 +1434,10 @@ MU_INLINE mu_shape mu_shape_klein_bottle(int slices, int stacks, float scale)
             float ht = 0.5f * th;
             float r = 2.0f + cosf(ht) * sinf(phi) - sinf(ht) * sinf(2.0f * phi);
             /* y and z swapped versus the textbook form so the axis stays +Y */
+            mu_vec3 scale6;
+            mu_vec3_scale(scale6, (mu_vec3){r * cosf(th), sinf(ht) * sinf(phi) + cosf(ht) * sinf(2.0f * phi), r * sinf(th)}, scale);
             mu_shape_add_vertex(&s,
-                mu_vec3_scale(mu_vec3_make(r * cosf(th),
-                                           sinf(ht) * sinf(phi) + cosf(ht) * sinf(2.0f * phi),
-                                           r * sinf(th)), scale), u, v);
+                scale6, u, v);
         }
     }
     mu_shape__grid_faces(&s, 0u, slices, stacks);
@@ -1444,14 +1474,13 @@ MU_INLINE mu_shape mu_shape_lathe(const mu_vec2 *profile, int n, int slices,
 
     for (j = 0; j < rows; ++j)
     {
-        float r = profile[j].x;
+        float r = profile[j][0];
         if (r < 0.0f) r = 0.0f;
         for (i = 0; i < slices; ++i)
         {
             float u = (float)i / (float)slices;
             float a = MU_SHAPE_TAU * u;
-            mu_shape_add_vertex(&s, mu_vec3_make(r * cosf(a), profile[j].y,
-                                                 r * sinf(a)),
+            mu_shape_add_vertex(&s, (mu_vec3){r * cosf(a), profile[j][1], r * sinf(a)},
                                 u, (float)j / (float)(rows > 1 ? rows - 1 : 1));
         }
     }
@@ -1483,10 +1512,10 @@ MU_INLINE mu_shape mu_shape_lathe(const mu_vec2 *profile, int n, int slices,
         for (j = 0; j < 2; ++j)
         {
             int e = ends[j];
-            if (profile[e].x <= 1e-5f) continue;   /* pole: already a fan */
+            if (profile[e][0] <= 1e-5f) continue;   /* pole: already a fan */
             {
                 uint32_t c = (uint32_t)mu_shape_add_vertex(
-                    &s, mu_vec3_make(0.0f, profile[e].y, 0.0f), 0.5f,
+                    &s, (mu_vec3){0.0f, profile[e][1], 0.0f}, 0.5f,
                     (float)e / (float)(n - 1));
                 uint32_t base = (uint32_t)e * (uint32_t)slices;
                 for (i = 0; i < slices; ++i)
@@ -1522,6 +1551,7 @@ MU_INLINE mu_shape mu_shape_lathe(const mu_vec2 *profile, int n, int slices,
  * per path point (a tapering or bulging tube). closed joins the last ring to the
  * first and applies the holonomy correction; caps fan each open end to the
  * centre. */
+
 MU_INLINE mu_shape mu_shape_tube_radii(const mu_vec3 *path, int n, float radius,
                                        const float *radii, int sides, int closed,
                                        int caps)
@@ -1547,55 +1577,68 @@ MU_INLINE mu_shape mu_shape_tube_radii(const mu_vec3 *path, int n, float radius,
         {
             int ip = (i + 1) % n;
             int im = (i + n - 1) % n;
-            d = mu_vec3_sub(path[ip], path[im]);
+            mu_vec3_sub(d, path[ip], path[im]);
         }
-        else if (i == 0)      d = mu_vec3_sub(path[1], path[0]);
-        else if (i == n - 1)  d = mu_vec3_sub(path[n - 1], path[n - 2]);
-        else                  d = mu_vec3_sub(path[i + 1], path[i - 1]);
-        tan[i] = mu_vec3_length2(d) > 1e-12f ? mu_vec3_normalize(d)
-                                             : mu_vec3_make(0.0f, 0.0f, 1.0f);
+        else if (i == 0)      mu_vec3_sub(d, path[1], path[0]);
+        else if (i == n - 1)  mu_vec3_sub(d, path[n - 1], path[n - 2]);
+        else                  mu_vec3_sub(d, path[i + 1], path[i - 1]);
+        if (mu_vec3_length2(d) > 1e-12f)
+            mu_vec3_normalize(tan[i], d);
+        else
+            mu_vec3_make(tan[i], 0.0f, 0.0f, 1.0f);
     }
 
     /* seed a reference vector perpendicular to the first tangent */
     {
-        mu_vec3 up = mu_vec3_make(0.0f, 1.0f, 0.0f);
-        mu_vec3 c = mu_vec3_cross(tan[0], up);
+        mu_vec3 up, c;
+        mu_vec3_make(up, 0.0f, 1.0f, 0.0f);
+        mu_vec3_cross(c, tan[0], up);
         if (mu_vec3_length2(c) < 1e-8f)
-            c = mu_vec3_cross(tan[0], mu_vec3_make(1.0f, 0.0f, 0.0f));
-        ref[0] = mu_vec3_normalize(c);
+        {
+            mu_vec3_make(up, 1.0f, 0.0f, 0.0f);
+            mu_vec3_cross(c, tan[0], up);
+        }
+        mu_vec3_normalize(ref[0], c);
     }
 
     /* double reflection transport */
     for (i = 0; i + 1 < n; ++i)
     {
-        mu_vec3 v1 = mu_vec3_sub(path[i + 1], path[i]);
-        float c1 = mu_vec3_length2(v1);
-        mu_vec3 rL, tL, v2;
-        float c2;
+        mu_vec3 v1, rL, tL, v2, t;
+        float c1, c2;
 
-        if (c1 < 1e-12f) { ref[i + 1] = ref[i]; continue; }
+        mu_vec3_sub(v1, path[i + 1], path[i]);
+        c1 = mu_vec3_length2(v1);
+        if (c1 < 1e-12f) { mu_vec3_copy(ref[i + 1], ref[i]); continue; }
 
-        rL = mu_vec3_sub(ref[i], mu_vec3_scale(v1, 2.0f * mu_vec3_dot(v1, ref[i]) / c1));
-        tL = mu_vec3_sub(tan[i], mu_vec3_scale(v1, 2.0f * mu_vec3_dot(v1, tan[i]) / c1));
-        v2 = mu_vec3_sub(tan[i + 1], tL);
+        mu_vec3_scale(t, v1, 2.0f * mu_vec3_dot(v1, ref[i]) / c1);
+        mu_vec3_sub(rL, ref[i], t);
+        mu_vec3_scale(t, v1, 2.0f * mu_vec3_dot(v1, tan[i]) / c1);
+        mu_vec3_sub(tL, tan[i], t);
+        mu_vec3_sub(v2, tan[i + 1], tL);
         c2 = mu_vec3_length2(v2);
 
         if (c2 < 1e-12f)
-            ref[i + 1] = rL;
+            mu_vec3_copy(ref[i + 1], rL);
         else
-            ref[i + 1] = mu_vec3_sub(rL,
-                mu_vec3_scale(v2, 2.0f * mu_vec3_dot(v2, rL) / c2));
-        ref[i + 1] = mu_vec3_length2(ref[i + 1]) > 1e-12f
-                   ? mu_vec3_normalize(ref[i + 1]) : ref[i];
+        {
+            mu_vec3_scale(t, v2, 2.0f * mu_vec3_dot(v2, rL) / c2);
+            mu_vec3_sub(ref[i + 1], rL, t);
+        }
+        if (mu_vec3_length2(ref[i + 1]) > 1e-12f)
+            mu_vec3_normalize(ref[i + 1], ref[i + 1]);
+        else
+            mu_vec3_copy(ref[i + 1], ref[i]);
     }
 
     /* closed path: measure the twist between the last frame and the first and
      * distribute -angle/n along the whole loop, so ring n == ring 0. */
     if (closed)
     {
-        mu_vec3 tn = tan[n - 1];
-        mu_vec3 r0 = ref[0];
-        mu_vec3 b0 = mu_vec3_cross(tn, ref[n - 1]);
+        mu_vec3 tn, r0, b0;
+        mu_vec3_copy(tn, tan[n - 1]);
+        mu_vec3_copy(r0, ref[0]);
+        mu_vec3_cross(b0, tn, ref[n - 1]);
         holonomy = atan2f(mu_vec3_dot(r0, b0), mu_vec3_dot(r0, ref[n - 1]));
     }
 
@@ -1609,22 +1652,27 @@ MU_INLINE mu_shape mu_shape_tube_radii(const mu_vec3 *path, int n, float radius,
     for (i = 0; i < n; ++i)
     {
         float r = radii ? radii[i] : radius;
-        mu_vec3 b = mu_vec3_cross(tan[i], ref[i]);
         float twist = closed ? -holonomy * (float)i / (float)n : 0.0f;
         float ct = cosf(twist), st = sinf(twist);
-        mu_vec3 rv = mu_vec3_add(mu_vec3_scale(ref[i], ct), mu_vec3_scale(b, st));
+        mu_vec3 b, rv, off, a1, a2;
 
-        rv = mu_vec3_normalize(rv);
-        b = mu_vec3_cross(tan[i], rv);
+        mu_vec3_cross(b, tan[i], ref[i]);
+        mu_vec3_scale(a1, ref[i], ct);
+        mu_vec3_scale(a2, b, st);
+        mu_vec3_add(rv, a1, a2);
+        mu_vec3_normalize(rv, rv);
+        mu_vec3_cross(b, tan[i], rv);
 
         for (j = 0; j < sides; ++j)
         {
             float u = (float)j / (float)sides;
             float a = MU_SHAPE_TAU * u;
-            mu_vec3 off = mu_vec3_add(mu_vec3_scale(rv, r * cosf(a)),
-                                      mu_vec3_scale(b, r * sinf(a)));
-            mu_shape_add_vertex(&s, mu_vec3_add(path[i], off), u,
-                                (float)i / (float)(n > 1 ? n - 1 : 1));
+
+            mu_vec3_scale(a1, rv, r * cosf(a));
+            mu_vec3_scale(a2, b, r * sinf(a));
+            mu_vec3_add(off, a1, a2);
+            mu_vec3_add(off, off, path[i]);
+            mu_shape_add_vertex(&s, off, u, (float)i / (float)(n > 1 ? n - 1 : 1));
         }
     }
 
@@ -1647,8 +1695,7 @@ MU_INLINE mu_shape mu_shape_tube_radii(const mu_vec3 *path, int n, float radius,
         for (j = 0; j < 2; ++j)
         {
             int e = ends[j];
-            uint32_t c = (uint32_t)mu_shape_add_vertex(
-                &s, path[e], 0.5f, (float)j);
+            uint32_t c = (uint32_t)mu_shape_add_vertex(&s, path[e], 0.5f, (float)j);
             uint32_t base = (uint32_t)e * (uint32_t)sides;
             int k;
             for (k = 0; k < sides; ++k)
@@ -1683,8 +1730,7 @@ MU_INLINE void mu_shape_helix_path(mu_vec3 *out, int n, float coil_radius,
     for (i = 0; i < n; ++i)
     {
         float t = (float)i / (float)(n > 1 ? n - 1 : 1) * turns * MU_SHAPE_TAU;
-        out[i] = mu_vec3_make(coil_radius * cosf(t), pitch * t / MU_SHAPE_TAU,
-                              coil_radius * sinf(t));
+        memcpy(out[i], (mu_vec3){coil_radius * cosf(t), pitch * t / MU_SHAPE_TAU, coil_radius * sinf(t)}, sizeof(out[i]));
     }
 }
 
@@ -1725,7 +1771,7 @@ MU_INLINE mu_shape mu_shape_trefoil_knot(int path_points, int sides, float scale
         float y = cosf(t) - 2.0f * cosf(2.0f * t);
         float z = -sinf(3.0f * t);
         /* swap y/z so the knot's natural axis is +Y */
-        path[i] = mu_vec3_scale(mu_vec3_make(x, z, y), scale / 3.0f);
+        mu_vec3_scale(path[i], (mu_vec3){x, z, y}, scale / 3.0f);
     }
     s = mu_shape_tube(path, path_points, wire_radius, sides, 1, 0);
     MU_FREE(path);
@@ -1734,15 +1780,24 @@ MU_INLINE mu_shape mu_shape_trefoil_knot(int path_points, int sides, float scale
 
 /* ---------- ear clipping ---------- */
 
-MU_INLINE float mu_shape__cross2(mu_vec2 a, mu_vec2 b) { return a.x * b.y - a.y * b.x; }
+MU_INLINE float mu_shape__cross2(const mu_vec2 a, const mu_vec2 b) { return a[0] * b[1] - a[1] * b[0]; }
 
-MU_INLINE int mu_shape__point_in_tri(mu_vec2 p, mu_vec2 a, mu_vec2 b, mu_vec2 c)
+
+MU_INLINE int mu_shape__point_in_tri(const mu_vec2 p, const mu_vec2 a,
+                                     const mu_vec2 b, const mu_vec2 c)
 {
-    mu_vec2 ab = mu_vec2_sub(b, a), bc = mu_vec2_sub(c, b), ca = mu_vec2_sub(a, c);
-    mu_vec2 ap = mu_vec2_sub(p, a), bp = mu_vec2_sub(p, b), cp = mu_vec2_sub(p, c);
-    float d0 = mu_shape__cross2(ab, ap);
-    float d1 = mu_shape__cross2(bc, bp);
-    float d2 = mu_shape__cross2(ca, cp);
+    mu_vec2 ab, bc, ca, ap, bp, cp;
+    float d0, d1, d2;
+
+    mu_vec2_sub(ab, b, a);
+    mu_vec2_sub(bc, c, b);
+    mu_vec2_sub(ca, a, c);
+    mu_vec2_sub(ap, p, a);
+    mu_vec2_sub(bp, p, b);
+    mu_vec2_sub(cp, p, c);
+    d0 = mu_shape__cross2(ab, ap);
+    d1 = mu_shape__cross2(bc, bp);
+    d2 = mu_shape__cross2(ca, cp);
     return (d0 >= 0.0f && d1 >= 0.0f && d2 >= 0.0f);
 }
 
@@ -1772,10 +1827,17 @@ MU_INLINE int mu_shape__ear_clip(const mu_vec2 *p, int n, int *out)
         {
             int ip = (i + count - 1) % count;
             int in = (i + 1) % count;
-            mu_vec2 a = p[idx[ip]], b = p[idx[i]], c = p[idx[in]];
+            mu_vec2 a, b, c;
+            memcpy(a, p[idx[ip]], sizeof(a));
+            memcpy(b, p[idx[i]], sizeof(b));
+            memcpy(c, p[idx[in]], sizeof(c));
             int k, inside = 0;
 
-            if (mu_shape__cross2(mu_vec2_sub(b, a), mu_vec2_sub(c, b)) <= 1e-12f)
+            mu_vec2 sub3;
+            mu_vec2_sub(sub3, b, a);
+            mu_vec2 sub4;
+            mu_vec2_sub(sub4, c, b);
+            if (mu_shape__cross2(sub3, sub4) <= 1e-12f)
                 continue;                      /* reflex or collinear: not an ear */
 
             for (k = 0; k < count; ++k)
@@ -1836,9 +1898,9 @@ MU_INLINE mu_shape mu_shape_extrude(const mu_vec2 *poly, int n, float height, fl
     ccw = area2 > 0.0f;
     for (i = 0; i < n; ++i)
     {
-        p[i] = ccw ? poly[i] : poly[n - 1 - i];
-        cx += p[i].x;
-        cz += p[i].y;
+        memcpy(p[i], ccw ? poly[i] : poly[n - 1 - i], sizeof(mu_vec2));
+        cx += p[i][0];
+        cz += p[i][1];
     }
     cx /= (float)n;
     cz /= (float)n;
@@ -1871,10 +1933,10 @@ MU_INLINE mu_shape mu_shape_extrude(const mu_vec2 *poly, int n, float height, fl
         float y = -h + height * t;
         for (i = 0; i < n; ++i)
         {
-            float dx = p[i].x - cx, dz = p[i].y - cz;
+            float dx = p[i][0] - cx, dz = p[i][1] - cz;
             float x = cx + dx * ct - dz * st;
             float z = cz + dx * st + dz * ct;
-            mu_shape_add_vertex(&s, mu_vec3_make(x, y, z), (float)i / (float)n, t);
+            mu_shape_add_vertex(&s, (mu_vec3){x, y, z}, (float)i / (float)n, t);
         }
     }
 
@@ -1983,8 +2045,11 @@ MU_INLINE uint32_t mu_shape_remove_degenerate(mu_shape *s, float min_area)
         if (a < s->npoints && b < s->npoints && c < s->npoints && a != b && b != c &&
             a != c)
         {
-            mu_vec3 cr = mu_vec3_cross(mu_vec3_sub(s->verts[b].p, s->verts[a].p),
-                                       mu_vec3_sub(s->verts[c].p, s->verts[a].p));
+            mu_vec3 sub5;
+            mu_vec3_sub(sub5, s->verts[b].p, s->verts[a].p);
+            mu_vec3 sub6;
+            mu_vec3_sub(sub6, s->verts[c].p, s->verts[a].p);
+            mu_vec3 cr; mu_vec3_cross(cr, sub5, sub6);
             area = 0.5f * mu_vec3_length(cr);
         }
         if (area > min_area)
@@ -2050,9 +2115,9 @@ MU_INLINE int mu_shape__weld_map(const mu_shape *s, float eps, uint32_t flags,
 
         for (i = 0; i < s->npoints; ++i)
         {
-            int32_t bx = (int32_t)floorf((s->verts[i].p.x - eps) / w);
-            int32_t by = (int32_t)floorf((s->verts[i].p.y - eps) / w);
-            int32_t bz = (int32_t)floorf((s->verts[i].p.z - eps) / w);
+            int32_t bx = (int32_t)floorf((s->verts[i].p[0] - eps) / w);
+            int32_t by = (int32_t)floorf((s->verts[i].p[1] - eps) / w);
+            int32_t bz = (int32_t)floorf((s->verts[i].p[2] - eps) / w);
             uint32_t best = i;
             int dx, dy, dz;
 
@@ -2064,14 +2129,18 @@ MU_INLINE int mu_shape__weld_map(const mu_shape *s, float eps, uint32_t flags,
                 uint32_t c = head[b];
                 while (c != MU_SHAPE_NONE)
                 {
-                    if (mu_vec3_length2(mu_vec3_sub(s->verts[c].p, s->verts[i].p)) <= eps2)
+                    mu_vec3 sub7;
+                    mu_vec3_sub(sub7, s->verts[c].p, s->verts[i].p);
+                    if (mu_vec3_length2(sub7) <= eps2)
                     {
                         int ok = 1;
                         if ((flags & MU_SHAPE_WELD_UV) &&
-                            (fabsf(s->verts[c].uv.x - s->verts[i].uv.x) > 1e-5f ||
-                             fabsf(s->verts[c].uv.y - s->verts[i].uv.y) > 1e-5f)) ok = 0;
+                            (fabsf(s->verts[c].uv[0] - s->verts[i].uv[0]) > 1e-5f ||
+                             fabsf(s->verts[c].uv[1] - s->verts[i].uv[1]) > 1e-5f)) ok = 0;
+                        mu_vec3 sub8;
+                        mu_vec3_sub(sub8, s->verts[c].n, s->verts[i].n);
                         if ((flags & MU_SHAPE_WELD_NORMAL) &&
-                            mu_vec3_length2(mu_vec3_sub(s->verts[c].n, s->verts[i].n)) > 1e-8f) ok = 0;
+                            mu_vec3_length2(sub8) > 1e-8f) ok = 0;
                         if (ok) { best = map[c]; break; }
                     }
                     c = next[c];
@@ -2082,9 +2151,9 @@ MU_INLINE int mu_shape__weld_map(const mu_shape *s, float eps, uint32_t flags,
             {
                 /* insert into the cell that owns p itself, which is base or
                  * base+1 along every axis, so the query above always sees it */
-                uint32_t b = mu_shape__hash3((int32_t)floorf(s->verts[i].p.x / w),
-                                             (int32_t)floorf(s->verts[i].p.y / w),
-                                             (int32_t)floorf(s->verts[i].p.z / w), mask);
+                uint32_t b = mu_shape__hash3((int32_t)floorf(s->verts[i].p[0] / w),
+                                             (int32_t)floorf(s->verts[i].p[1] / w),
+                                             (int32_t)floorf(s->verts[i].p[2] / w), mask);
                 next[i] = head[b];
                 head[b] = i;
             }
@@ -2200,7 +2269,7 @@ MU_INLINE int mu_shape_compute_normals(mu_shape *s)
     if (!mu_shape__weld_map(s, 1e-5f, MU_SHAPE_WELD_NONE, map))
     { MU_FREE(map); MU_FREE(acc); return 0; }
 
-    for (i = 0; i < s->npoints; ++i) acc[i] = mu_vec3_zero();
+    for (i = 0; i < s->npoints; ++i) mu_vec3_zero(acc[i]);
 
     for (i = 0; i < s->ntriangles; ++i)
     {
@@ -2212,18 +2281,24 @@ MU_INLINE int mu_shape_compute_normals(mu_shape *s)
         if (a >= s->npoints || b >= s->npoints || c >= s->npoints) continue;
         /* un-normalised cross product == 2 * area * normal, so accumulating it
          * weights by area for free */
-        fn = mu_vec3_cross(mu_vec3_sub(s->verts[b].p, s->verts[a].p),
-                           mu_vec3_sub(s->verts[c].p, s->verts[a].p));
-        acc[map[a]] = mu_vec3_add(acc[map[a]], fn);
-        acc[map[b]] = mu_vec3_add(acc[map[b]], fn);
-        acc[map[c]] = mu_vec3_add(acc[map[c]], fn);
+        mu_vec3 sub9;
+        mu_vec3_sub(sub9, s->verts[b].p, s->verts[a].p);
+        mu_vec3 sub10;
+        mu_vec3_sub(sub10, s->verts[c].p, s->verts[a].p);
+        mu_vec3_cross(fn, sub9, sub10);
+        mu_vec3_add(acc[map[a]], acc[map[a]], fn);
+        mu_vec3_add(acc[map[b]], acc[map[b]], fn);
+        mu_vec3_add(acc[map[c]], acc[map[c]], fn);
     }
 
     for (i = 0; i < s->npoints; ++i)
     {
-        mu_vec3 n = acc[map[i]];
-        s->verts[i].n = mu_vec3_length2(n) > 1e-20f ? mu_vec3_normalize(n)
-                                                    : mu_vec3_make(0.0f, 1.0f, 0.0f);
+        mu_vec3 n;
+        mu_vec3_copy(n, acc[map[i]]);
+        if (mu_vec3_length2(n) > 1e-20f)
+            mu_vec3_normalize(s->verts[i].n, n);
+        else
+            mu_vec3_make(s->verts[i].n, 0.0f, 1.0f, 0.0f);
     }
     MU_FREE(map);
     MU_FREE(acc);
@@ -2244,32 +2319,38 @@ MU_INLINE void mu_shape_compute_normals_flat(mu_shape *s)
         mu_vec3 fn;
 
         if (a >= s->npoints || b >= s->npoints || c >= s->npoints) continue;
-        fn = mu_vec3_cross(mu_vec3_sub(s->verts[b].p, s->verts[a].p),
-                           mu_vec3_sub(s->verts[c].p, s->verts[a].p));
-        fn = mu_vec3_length2(fn) > 1e-20f ? mu_vec3_normalize(fn)
-                                          : mu_vec3_make(0.0f, 1.0f, 0.0f);
-        s->verts[a].n = fn;
-        s->verts[b].n = fn;
-        s->verts[c].n = fn;
+        mu_vec3 sub11;
+        mu_vec3_sub(sub11, s->verts[b].p, s->verts[a].p);
+        mu_vec3 sub12;
+        mu_vec3_sub(sub12, s->verts[c].p, s->verts[a].p);
+        mu_vec3_cross(fn, sub11, sub12);
+        if (mu_vec3_length2(fn) > 1e-20f)
+            mu_vec3_normalize(fn, fn);
+        else
+            mu_vec3_make(fn, 0.0f, 1.0f, 0.0f);
+        mu_vec3_copy(s->verts[a].n, fn);
+        mu_vec3_copy(s->verts[b].n, fn);
+        mu_vec3_copy(s->verts[c].n, fn);
     }
 }
 
 /* ---------- measurements ---------- */
 
+
 MU_INLINE void mu_shape_aabb(const mu_shape *s, mu_vec3 *lo, mu_vec3 *hi)
 {
     uint32_t i;
 
-    if (lo) *lo = mu_vec3_zero();
-    if (hi) *hi = mu_vec3_zero();
+    if (lo) mu_vec3_zero(*lo);
+    if (hi) mu_vec3_zero(*hi);
     if (!s || s->npoints == 0) return;
 
-    if (lo) *lo = s->verts[0].p;
-    if (hi) *hi = s->verts[0].p;
+    if (lo) mu_vec3_copy(*lo, s->verts[0].p);
+    if (hi) mu_vec3_copy(*hi, s->verts[0].p);
     for (i = 1; i < s->npoints; ++i)
     {
-        if (lo) *lo = mu_vec3_min(*lo, s->verts[i].p);
-        if (hi) *hi = mu_vec3_max(*hi, s->verts[i].p);
+        if (lo) mu_vec3_min(*lo, *lo, s->verts[i].p);
+        if (hi) mu_vec3_max(*hi, *hi, s->verts[i].p);
     }
 }
 
@@ -2285,9 +2366,14 @@ MU_INLINE float mu_shape_area(const mu_shape *s)
         uint32_t b = (uint32_t)s->triangles[3u * i + 1u];
         uint32_t c = (uint32_t)s->triangles[3u * i + 2u];
         if (a >= s->npoints || b >= s->npoints || c >= s->npoints) continue;
+        mu_vec3 sub13;
+        mu_vec3_sub(sub13, s->verts[b].p, s->verts[a].p);
+        mu_vec3 sub14;
+        mu_vec3_sub(sub14, s->verts[c].p, s->verts[a].p);
+        mu_vec3 cross;
+        mu_vec3_cross(cross, sub13, sub14);
         sum += 0.5 * (double)mu_vec3_length(
-            mu_vec3_cross(mu_vec3_sub(s->verts[b].p, s->verts[a].p),
-                          mu_vec3_sub(s->verts[c].p, s->verts[a].p)));
+            cross);
     }
     return (float)sum;
 }
@@ -2308,8 +2394,10 @@ MU_INLINE float mu_shape_volume(const mu_shape *s)
         uint32_t b = (uint32_t)s->triangles[3u * i + 1u];
         uint32_t c = (uint32_t)s->triangles[3u * i + 2u];
         if (a >= s->npoints || b >= s->npoints || c >= s->npoints) continue;
+        mu_vec3 cross1;
+        mu_vec3_cross(cross1, s->verts[b].p, s->verts[c].p);
         sum += (double)mu_vec3_dot(s->verts[a].p,
-                                   mu_vec3_cross(s->verts[b].p, s->verts[c].p)) / 6.0;
+                                   cross1) / 6.0;
     }
     return (float)sum;
 }
@@ -2624,8 +2712,9 @@ MU_INLINE int mu_shape_validate(const mu_shape *s, char *err, size_t errlen)
 
     for (i = 0; i < s->npoints; ++i)
     {
-        const mu_vec3 p = s->verts[i].p;
-        if (!(p.x == p.x) || !(p.y == p.y) || !(p.z == p.z))
+        mu_vec3 p;
+        mu_vec3_copy(p, s->verts[i].p);
+        if (!(p[0] == p[0]) || !(p[1] == p[1]) || !(p[2] == p[2]))
             MU_SHAPE_FAIL("NaN/Inf in positions");
     }
     for (i = 0; i < s->ntriangles * 3u; ++i)
@@ -2649,9 +2738,14 @@ MU_INLINE int mu_shape_validate(const mu_shape *s, char *err, size_t errlen)
             uint32_t b = (uint32_t)s->triangles[3u * i + 1u];
             uint32_t c = (uint32_t)s->triangles[3u * i + 2u];
             if (a == b || b == c || a == c) MU_SHAPE_FAIL("repeated index in a triangle");
+            mu_vec3 sub15;
+            mu_vec3_sub(sub15, s->verts[b].p, s->verts[a].p);
+            mu_vec3 sub16;
+            mu_vec3_sub(sub16, s->verts[c].p, s->verts[a].p);
+            mu_vec3 cross2;
+            mu_vec3_cross(cross2, sub15, sub16);
             total += 0.5 * (double)mu_vec3_length(
-                mu_vec3_cross(mu_vec3_sub(s->verts[b].p, s->verts[a].p),
-                              mu_vec3_sub(s->verts[c].p, s->verts[a].p)));
+                cross2);
         }
         mean = total / (double)s->ntriangles;
         for (i = 0; i < s->ntriangles; ++i)
@@ -2659,9 +2753,14 @@ MU_INLINE int mu_shape_validate(const mu_shape *s, char *err, size_t errlen)
             uint32_t a = (uint32_t)s->triangles[3u * i + 0u];
             uint32_t b = (uint32_t)s->triangles[3u * i + 1u];
             uint32_t c = (uint32_t)s->triangles[3u * i + 2u];
+            mu_vec3 sub17;
+            mu_vec3_sub(sub17, s->verts[b].p, s->verts[a].p);
+            mu_vec3 sub18;
+            mu_vec3_sub(sub18, s->verts[c].p, s->verts[a].p);
+            mu_vec3 cross3;
+            mu_vec3_cross(cross3, sub17, sub18);
             double area = 0.5 * (double)mu_vec3_length(
-                mu_vec3_cross(mu_vec3_sub(s->verts[b].p, s->verts[a].p),
-                              mu_vec3_sub(s->verts[c].p, s->verts[a].p)));
+                cross3);
             if (area == 0.0) MU_SHAPE_FAIL("zero-area triangle");
             if (area < 1e-12 * mean) MU_SHAPE_FAIL("degenerate (sliver) triangle");
         }
@@ -2711,7 +2810,7 @@ MU_INLINE int mu_shape_loop_subdivide(mu_shape *s, int levels)
             mu_shape__edges_free(&e);
             return 0;
         }
-        for (i = 0; i < s->npoints; ++i) { vsum[i] = mu_vec3_zero(); deg[i] = 0; }
+        for (i = 0; i < s->npoints; ++i) { mu_vec3_zero(vsum[i]); deg[i] = 0; }
         for (i = 0; i < e.mask + 1u; ++i) emap[i] = MU_SHAPE_NONE;
 
         /* edge points occupy [npoints, npoints + e.count) */
@@ -2723,22 +2822,29 @@ MU_INLINE int mu_shape_loop_subdivide(mu_shape *s, int levels)
                 mu_vec3 p;
                 if (cur->key == 0u) continue;
 
-                vsum[cur->v0] = mu_vec3_add(vsum[cur->v0], s->verts[cur->v1].p);
-                vsum[cur->v1] = mu_vec3_add(vsum[cur->v1], s->verts[cur->v0].p);
+                mu_vec3_add(vsum[cur->v0], vsum[cur->v0], s->verts[cur->v1].p);
+                mu_vec3_add(vsum[cur->v1], vsum[cur->v1], s->verts[cur->v0].p);
                 ++deg[cur->v0];
                 ++deg[cur->v1];
 
-                if (cur->count == 2u)
-                    p = mu_vec3_add(
-                            mu_vec3_scale(mu_vec3_add(s->verts[cur->v0].p,
-                                                      s->verts[cur->v1].p), 0.375f),
-                            mu_vec3_scale(mu_vec3_add(s->verts[cur->opp[0]].p,
-                                                      s->verts[cur->opp[1]].p), 0.125f));
-                else
-                    p = mu_vec3_scale(mu_vec3_add(s->verts[cur->v0].p,
-                                                  s->verts[cur->v1].p), 0.5f);
+                if (cur->count == 2u) {
+                    mu_vec3 add;
+                    mu_vec3_add(add, s->verts[cur->v0].p, s->verts[cur->v1].p);
+                    mu_vec3 scale7;
+                    mu_vec3_scale(scale7, add, 0.375f);
+                    mu_vec3 add1;
+                    mu_vec3_add(add1, s->verts[cur->opp[0]].p, s->verts[cur->opp[1]].p);
+                    mu_vec3 scale8;
+                    mu_vec3_scale(scale8, add1, 0.125f);
+                    mu_vec3_add(p, scale7, scale8);
+                }
+                else {
+                    mu_vec3 add2;
+                    mu_vec3_add(add2, s->verts[cur->v0].p, s->verts[cur->v1].p);
+                    mu_vec3_scale(p, add2, 0.5f);
+                }
 
-                vnew[k] = p;
+                mu_vec3_copy(vnew[k], p);
                 emap[i] = k;
                 ++k;
             }
@@ -2746,13 +2852,16 @@ MU_INLINE int mu_shape_loop_subdivide(mu_shape *s, int levels)
 
         for (i = 0; i < s->npoints; ++i)
         {
-            if (deg[i] == 0) { vnew[i] = s->verts[i].p; continue; }
+            if (deg[i] == 0) { mu_vec3_copy(vnew[i], s->verts[i].p); continue; }
             {
                 float beta = (deg[i] == 3u) ? 3.0f / 16.0f
                                             : 3.0f / (8.0f * (float)deg[i]);
                 float keep = 1.0f - beta * (float)deg[i];
-                vnew[i] = mu_vec3_add(mu_vec3_scale(s->verts[i].p, keep),
-                                      mu_vec3_scale(vsum[i], beta));
+                mu_vec3 scale9;
+                mu_vec3_scale(scale9, s->verts[i].p, keep);
+                mu_vec3 scale10;
+                mu_vec3_scale(scale10, vsum[i], beta);
+                mu_vec3_add(vnew[i], scale9, scale10);
             }
         }
 
@@ -2760,7 +2869,7 @@ MU_INLINE int mu_shape_loop_subdivide(mu_shape *s, int levels)
         {
             uint32_t k;
             float u = 0.0f, v = 0.0f;
-            if (i < s->npoints) { u = s->verts[i].uv.x; v = s->verts[i].uv.y; }
+            if (i < s->npoints) { u = s->verts[i].uv[0]; v = s->verts[i].uv[1]; }
             k = (uint32_t)mu_shape_add_vertex(&out, vnew[i], u, v);
             (void)k;
         }
@@ -2826,8 +2935,11 @@ MU_INLINE mu_shape mu_shape_icosphere(int level, float radius)
         mu_shape_free(&s);
         return mu_shape_empty();
     }
-    for (i = 0; i < s.npoints; ++i)
-        s.verts[i].p = mu_vec3_scale(mu_vec3_normalize(s.verts[i].p), radius);
+    for (i = 0; i < s.npoints; ++i) {
+        mu_vec3 normalize4;
+        mu_vec3_normalize(normalize4, s.verts[i].p);
+        mu_vec3_scale(s.verts[i].p, normalize4, radius);
+    }
 
     mu_shape_compute_normals(&s);
     return s;
@@ -2845,16 +2957,18 @@ MU_INLINE mu_shape mu_shape_rock(int level, float radius, float amplitude,
     if (s.npoints == 0) return s;
     for (i = 0; i < s.npoints; ++i)
     {
-        mu_vec3 d = mu_vec3_normalize(s.verts[i].p);
+        mu_vec3 d; mu_vec3_normalize(d, s.verts[i].p);
         float h;
 #if defined(MU_NOISE_MATH_H)
-        h = mu_noise_fbm3(mu_noise_simplex3, d.x * 2.0f, d.y * 2.0f, d.z * 2.0f,
+        h = mu_noise_fbm3(mu_noise_simplex3, d[0] * 2.0f, d[1] * 2.0f, d[2] * 2.0f,
                           seed, 4, 2.0f, 0.5f);
 #else
-        h = sinf(d.x * 12.9898f + d.y * 78.233f + d.z * 37.719f +
+        h = sinf(d[0] * 12.9898f + d[1] * 78.233f + d[2] * 37.719f +
                  (float)(seed & 1023u)) * 0.5f;
 #endif
-        s.verts[i].p = mu_vec3_add(s.verts[i].p, mu_vec3_scale(d, amplitude * h));
+        mu_vec3 scale11;
+        mu_vec3_scale(scale11, d, amplitude * h);
+        mu_vec3_add(s.verts[i].p, s.verts[i].p, scale11);
     }
     mu_shape_compute_normals(&s);
     return s;
@@ -2876,14 +2990,14 @@ MU_INLINE int mu_shape_export_obj(const mu_shape *s, const char *path)
 
     fprintf(f, "# mu_shapes: %u points, %u triangles\n", s->npoints, s->ntriangles);
     for (i = 0; i < s->npoints; ++i)
-        fprintf(f, "v %.6g %.6g %.6g\n", (double)s->verts[i].p.x,
-                (double)s->verts[i].p.y, (double)s->verts[i].p.z);
+        fprintf(f, "v %.6g %.6g %.6g\n", (double)s->verts[i].p[0],
+                (double)s->verts[i].p[1], (double)s->verts[i].p[2]);
     for (i = 0; i < s->npoints; ++i)
-        fprintf(f, "vt %.6g %.6g\n", (double)s->verts[i].uv.x,
-                (double)s->verts[i].uv.y);
+        fprintf(f, "vt %.6g %.6g\n", (double)s->verts[i].uv[0],
+                (double)s->verts[i].uv[1]);
     for (i = 0; i < s->npoints; ++i)
-        fprintf(f, "vn %.6g %.6g %.6g\n", (double)s->verts[i].n.x,
-                (double)s->verts[i].n.y, (double)s->verts[i].n.z);
+        fprintf(f, "vn %.6g %.6g %.6g\n", (double)s->verts[i].n[0],
+                (double)s->verts[i].n[1], (double)s->verts[i].n[2]);
     for (i = 0; i < s->ntriangles; ++i)
     {
         uint32_t a = (uint32_t)s->triangles[3u * i + 0u] + 1u;
@@ -2929,15 +3043,21 @@ typedef struct mu_sdf_plane_t   { mu_vec3 n; float d; } mu_sdf_plane_t;
 MU_INLINE float mu_sdf_sphere(mu_vec3 p, void *user)
 {
     const mu_sdf_sphere_t *s = (const mu_sdf_sphere_t *)user;
-    return mu_vec3_length(mu_vec3_sub(p, s->c)) - s->r;
+    mu_vec3 sub19;
+    mu_vec3_sub(sub19, p, s->c);
+    return mu_vec3_length(sub19) - s->r;
 }
 
 MU_INLINE float mu_sdf_box(mu_vec3 p, void *user)
 {
     const mu_sdf_box_t *b = (const mu_sdf_box_t *)user;
-    mu_vec3 q = mu_vec3_sub(mu_vec3_abs(mu_vec3_sub(p, b->c)), b->half);
-    mu_vec3 out = mu_vec3_max(q, mu_vec3_zero());
-    float m = q.x > q.y ? (q.x > q.z ? q.x : q.z) : (q.y > q.z ? q.y : q.z);
+    mu_vec3 sub20;
+    mu_vec3_sub(sub20, p, b->c);
+    mu_vec3 abs;
+    mu_vec3_abs(abs, sub20);
+    mu_vec3 q; mu_vec3_sub(q, abs, b->half);
+    mu_vec3 out; mu_vec3_max(out, q, (mu_vec3){0.0f, 0.0f, 0.0f});
+    float m = q[0] > q[1] ? (q[0] > q[2] ? q[0] : q[2]) : (q[1] > q[2] ? q[1] : q[2]);
 
     /* outside: |max(q,0)|; inside: the (negative) largest component. The usual
      * two-line bit of SDF algebra, spelled out because it is easy to get wrong. */
@@ -2947,20 +3067,24 @@ MU_INLINE float mu_sdf_box(mu_vec3 p, void *user)
 MU_INLINE float mu_sdf_capsule(mu_vec3 p, void *user)
 {
     const mu_sdf_capsule_t *c = (const mu_sdf_capsule_t *)user;
-    mu_vec3 pa = mu_vec3_sub(p, c->a);
-    mu_vec3 ba = mu_vec3_sub(c->b, c->a);
+    mu_vec3 pa; mu_vec3_sub(pa, p, c->a);
+    mu_vec3 ba; mu_vec3_sub(ba, c->b, c->a);
     float h = mu_vec3_dot(pa, ba) / mu_vec3_dot(ba, ba);
     if (h < 0.0f) h = 0.0f;
     if (h > 1.0f) h = 1.0f;
-    return mu_vec3_length(mu_vec3_sub(pa, mu_vec3_scale(ba, h))) - c->r;
+    mu_vec3 scale12;
+    mu_vec3_scale(scale12, ba, h);
+    mu_vec3 sub21;
+    mu_vec3_sub(sub21, pa, scale12);
+    return mu_vec3_length(sub21) - c->r;
 }
 
 MU_INLINE float mu_sdf_torus(mu_vec3 p, void *user)
 {
     const mu_sdf_torus_t *t = (const mu_sdf_torus_t *)user;
-    mu_vec3 q = mu_vec3_sub(p, t->c);
-    float r = sqrtf(q.x * q.x + q.z * q.z) - t->major;
-    return sqrtf(r * r + q.y * q.y) - t->minor;
+    mu_vec3 q; mu_vec3_sub(q, p, t->c);
+    float r = sqrtf(q[0] * q[0] + q[2] * q[2]) - t->major;
+    return sqrtf(r * r + q[1] * q[1]) - t->minor;
 }
 
 MU_INLINE float mu_sdf_plane(mu_vec3 p, void *user)
@@ -3012,28 +3136,34 @@ typedef struct mu_shape__grid
     mu_vec3  step;
 } mu_shape__grid;
 
-MU_INLINE mu_vec3 mu_shape__grid_pos(const mu_shape__grid *g, uint32_t idx)
+
+MU_INLINE void mu_shape__grid_pos(mu_vec3 out, const mu_shape__grid *g, uint32_t idx)
 {
     uint32_t i = idx % g->n;
     uint32_t j = (idx / g->n) % g->n;
     uint32_t k = idx / (g->n * g->n);
-    return mu_vec3_make(g->lo.x + (float)i * g->step.x,
-                        g->lo.y + (float)j * g->step.y,
-                        g->lo.z + (float)k * g->step.z);
+    mu_vec3_make(out, g->lo[0] + (float)i * g->step[0],
+                      g->lo[1] + (float)j * g->step[1],
+                      g->lo[2] + (float)k * g->step[2]);
 }
 
 /* Crossing point on edge (ga, gb), always interpolated from the lower index so
  * two cells sharing the edge produce the identical float. */
-MU_INLINE mu_vec3 mu_shape__grid_cross(const mu_shape__grid *g, const float *vals,
-                                       uint32_t ga, uint32_t gb, float iso)
+
+MU_INLINE void mu_shape__grid_cross(mu_vec3 out, const mu_shape__grid *g,
+                                    const float *vals,
+                                    uint32_t ga, uint32_t gb, float iso)
 {
     uint32_t lo = ga < gb ? ga : gb;
     uint32_t hi = ga < gb ? gb : ga;
     float va = vals[lo];
     float vb = vals[hi];
     float t = (iso - va) / (vb - va);
+    mu_vec3 a, b;
 
-    return mu_vec3_lerp(mu_shape__grid_pos(g, lo), mu_shape__grid_pos(g, hi), t);
+    mu_shape__grid_pos(a, g, lo);
+    mu_shape__grid_pos(b, g, hi);
+    mu_vec3_lerp(out, a, b, t);
 }
 
 /* SDF -> watertight mesh over the box [lo,hi] at `res` cells per axis.
@@ -3059,10 +3189,11 @@ MU_INLINE mu_shape mu_shape_from_sdf(mu_sdf_fn fn, void *user, mu_vec3 lo, mu_ve
 
     n = (uint32_t)res + 1u;
     g.n = n;
-    g.lo = lo;
-    g.step = mu_vec3_make((hi.x - lo.x) / (float)res, (hi.y - lo.y) / (float)res,
-                          (hi.z - lo.z) / (float)res);
-    diag = mu_vec3_length(mu_vec3_sub(hi, lo));
+    mu_vec3_copy(g.lo, lo);
+    memcpy(g.step, (mu_vec3){(hi[0] - lo[0]) / (float)res, (hi[1] - lo[1]) / (float)res, (hi[2] - lo[2]) / (float)res}, sizeof(g.step));
+    mu_vec3 sub22;
+    mu_vec3_sub(sub22, hi, lo);
+    diag = mu_vec3_length(sub22);
 
     vals = (float *)MU_MALLOC((size_t)n * n * n * sizeof *vals);
     if (!vals) return s;
@@ -3071,9 +3202,7 @@ MU_INLINE mu_shape mu_shape_from_sdf(mu_sdf_fn fn, void *user, mu_vec3 lo, mu_ve
         for (j = 0; j < n; ++j)
             for (i = 0; i < n; ++i)
                 vals[i + n * (j + n * k)] = fn(
-                    mu_vec3_make(lo.x + (float)i * g.step.x,
-                                 lo.y + (float)j * g.step.y,
-                                 lo.z + (float)k * g.step.z), user);
+                    (mu_vec3){lo[0] + (float)i * g.step[0], lo[1] + (float)j * g.step[1], lo[2] + (float)k * g.step[2]}, user);
 
     for (k = 0; k + 1u < n; ++k)
     for (j = 0; j + 1u < n; ++j)
@@ -3109,16 +3238,17 @@ MU_INLINE mu_shape mu_shape_from_sdf(mu_sdf_fn fn, void *user, mu_vec3 lo, mu_ve
             }
             if (nin == 0 || nin == 4) continue;
 
-            pin = mu_vec3_zero();
-            pout = mu_vec3_zero();
+            memcpy(pin, (mu_vec3){0.0f, 0.0f, 0.0f}, sizeof(pin));
+            memcpy(pout, (mu_vec3){0.0f, 0.0f, 0.0f}, sizeof(pout));
             for (c = 0; c < 4; ++c)
             {
-                mu_vec3 p = mu_shape__grid_pos(&g, corner[mu_shape__tets[t][c]]);
-                if (inside[c]) pin = mu_vec3_add(pin, p);
-                else           pout = mu_vec3_add(pout, p);
+                mu_vec3 p;
+                mu_shape__grid_pos(p, &g, corner[mu_shape__tets[t][c]]);
+                if (inside[c]) mu_vec3_add(pin, pin, p);
+                else           mu_vec3_add(pout, pout, p);
             }
-            pin = mu_vec3_scale(pin, 1.0f / (float)nin);
-            pout = mu_vec3_scale(pout, 1.0f / (float)(4 - nin));
+            mu_vec3_scale(pin, pin, 1.0f / (float)nin);
+            mu_vec3_scale(pout, pout, 1.0f / (float)(4 - nin));
 
             for (ea = 0; ea < 4; ++ea)
                 for (eb = 0; eb < 4; ++eb)
@@ -3129,10 +3259,11 @@ MU_INLINE mu_shape mu_shape_from_sdf(mu_sdf_fn fn, void *user, mu_vec3 lo, mu_ve
             {
                 uint32_t v;
                 if (inside[ea] == inside[eb]) continue;
-                v = (uint32_t)mu_shape_add_vertex(
-                        &s, mu_shape__grid_cross(&g, vals,
-                                 corner[mu_shape__tets[t][ea]],
-                                 corner[mu_shape__tets[t][eb]], iso), 0.0f, 0.0f);
+                mu_vec3 gc;
+                mu_shape__grid_cross(gc, &g, vals,
+                                     corner[mu_shape__tets[t][ea]],
+                                     corner[mu_shape__tets[t][eb]], iso);
+                v = (uint32_t)mu_shape_add_vertex(&s, gc, 0.0f, 0.0f);
                 ev[ea][eb] = v;
                 ev[eb][ea] = v;
             }
@@ -3142,12 +3273,15 @@ MU_INLINE mu_shape mu_shape_from_sdf(mu_sdf_fn fn, void *user, mu_vec3 lo, mu_ve
              * need to reason about the winding of six tetrahedra. */
 #define MU_SHAPE__ORIENT(i0, i1, i2)                                           \
             do {                                                               \
-                mu_vec3 A_ = s.verts[i0].p;                                    \
-                mu_vec3 B_ = s.verts[i1].p;                                    \
-                mu_vec3 C_ = s.verts[i2].p;                                    \
-                mu_vec3 fn_ = mu_vec3_cross(mu_vec3_sub(B_, A_),               \
-                                            mu_vec3_sub(C_, A_));              \
-                if (mu_vec3_dot(fn_, mu_vec3_sub(pout, pin)) < 0.0f)           \
+                mu_vec3 A_, B_, C_, e1_, e2_, fn_, dir_;                       \
+                mu_vec3_copy(A_, s.verts[i0].p);                               \
+                mu_vec3_copy(B_, s.verts[i1].p);                               \
+                mu_vec3_copy(C_, s.verts[i2].p);                               \
+                mu_vec3_sub(e1_, B_, A_);                                      \
+                mu_vec3_sub(e2_, C_, A_);                                      \
+                mu_vec3_cross(fn_, e1_, e2_);                                  \
+                mu_vec3_sub(dir_, pout, pin);                                  \
+                if (mu_vec3_dot(fn_, dir_) < 0.0f)                             \
                     mu_shape_add_triangle(&s, i0, i2, i1);                     \
                 else                                                           \
                     mu_shape_add_triangle(&s, i0, i1, i2);                     \
@@ -3276,35 +3410,49 @@ typedef struct
  * projection gets short but not short enough to trip a 1e-12 test, normalize
  * returns zero, and the tube collapses to a line of degenerate quads. That cost
  * four hours and this comment. */
-MU_INLINE void mu_lsystem__basis(mu_vec3 head, mu_vec3 up, mu_vec3 *u, mu_vec3 *v)
+
+MU_INLINE void mu_lsystem__basis(const mu_vec3 head, const mu_vec3 up,
+                                 mu_vec3 u, mu_vec3 v)
 {
-    mu_vec3 t = mu_vec3_sub(up, mu_vec3_scale(head, mu_vec3_dot(up, head)));
-    float l2 = mu_vec3_length2(t);
+    mu_vec3 t, tmp;
+    float l2;
+
+    mu_vec3_scale(tmp, head, mu_vec3_dot(up, head));
+    mu_vec3_sub(t, up, tmp);
+    l2 = mu_vec3_length2(t);
 
     if (l2 > 1e-4f)
     {
-        *u = mu_vec3_scale(t, 1.0f / sqrtf(l2));
+        mu_vec3_scale(u, t, 1.0f / sqrtf(l2));
     }
     else
     {
         /* head and up are (numerically) the same direction: any perpendicular
          * will do, and the cross product below cannot be short */
-        mu_vec3 alt = fabsf(head.y) < 0.9f ? mu_vec3_make(0.0f, 1.0f, 0.0f)
-                                            : mu_vec3_make(1.0f, 0.0f, 0.0f);
-        *u = mu_vec3_normalize(mu_vec3_cross(head, alt));
+        if (fabsf(head[1]) < 0.9f) mu_vec3_make(t, 0.0f, 1.0f, 0.0f);
+        else                       mu_vec3_make(t, 1.0f, 0.0f, 0.0f);
+        mu_vec3_cross(u, head, t);
+        mu_vec3_normalize(u, u);
     }
-    *v = mu_vec3_cross(head, *u);
+    mu_vec3_cross(v, head, u);
 }
 
 /* Rotate `v` (and the head) about `axis` by `a` radians: a quaternion-free
  * Rodrigues rotation, which is 9 mul + 6 add and exact enough at these angles. */
-MU_INLINE mu_vec3 mu_lsystem__rotate(mu_vec3 v, mu_vec3 axis, float a)
+
+MU_INLINE void mu_lsystem__rotate(mu_vec3 out, const mu_vec3 v,
+                                  const mu_vec3 axis, float a)
 {
     float c = cosf(a), s = sinf(a);
-    mu_vec3 cross = mu_vec3_cross(axis, v);
-    float    dot = mu_vec3_dot(axis, v);
-    return mu_vec3_add(mu_vec3_add(mu_vec3_scale(v, c), mu_vec3_scale(cross, s)),
-                       mu_vec3_scale(axis, dot * (1.0f - c)));
+    mu_vec3 cross, term, tmp;
+
+    mu_vec3_cross(cross, axis, v);
+    float dot = mu_vec3_dot(axis, v);
+    mu_vec3_scale(term, v, c);
+    mu_vec3_scale(tmp, cross, s);
+    mu_vec3_add(out, term, tmp);
+    mu_vec3_scale(tmp, axis, dot * (1.0f - c));
+    mu_vec3_add(out, out, tmp);
 }
 
 /* Emit a ring of `slices` vertices at the turtle position. Returns its base
@@ -3319,14 +3467,18 @@ MU_INLINE uint32_t mu_lsystem__ring(mu_shape *s, const mu_lsystem__turtle *t,
     if (s->flags & MU_SHAPE_FLAG_OOM) return MU_SHAPE_NONE;
     if (!mu_shape__reserve_points(s, s->npoints + (uint32_t)slices)) return MU_SHAPE_NONE;
 
-    mu_lsystem__basis(t->head, t->up, &u, &w);
+    mu_lsystem__basis(t->head, t->up, u, w);
     base = s->npoints;
     for (i = 0; i < slices; ++i)
     {
         float a = MU_SHAPE_TAU * (float)i / (float)slices;
-        mu_vec3 p = mu_vec3_add(t->pos,
-                                mu_vec3_add(mu_vec3_scale(u, t->radius * cosf(a)),
-                                            mu_vec3_scale(w, t->radius * sinf(a))));
+        mu_vec3 scale13;
+        mu_vec3_scale(scale13, u, t->radius * cosf(a));
+        mu_vec3 scale14;
+        mu_vec3_scale(scale14, w, t->radius * sinf(a));
+        mu_vec3 add3;
+        mu_vec3_add(add3, scale13, scale14);
+        mu_vec3 p; mu_vec3_add(p, t->pos, add3);
         mu_shape_add_vertex(s, p, (float)i / (float)slices, v);
     }
     return base;
@@ -3427,8 +3579,8 @@ MU_INLINE mu_shape mu_shape_lsystem(const mu_lsystem_config *cfg,
     stack = (mu_lsystem__turtle *)MU_MALLOC((size_t)stackcap * sizeof *stack);
     if (!stack) goto done;
     memset(&stack[0], 0, sizeof stack[0]);
-    stack[0].head = mu_vec3_make(0.0f, 1.0f, 0.0f);
-    stack[0].up = mu_vec3_make(0.0f, 0.0f, 1.0f);
+    memcpy(stack[0].head, (mu_vec3){0.0f, 1.0f, 0.0f}, sizeof(stack[0].head));
+    mu_vec3_make(stack[0].up, 0.0f, 0.0f, 1.0f);
     stack[0].radius = cfg->radius > 0.0f ? cfg->radius : 0.02f;
     stack[0].ring = MU_SHAPE_NONE;
     sp = 0;
@@ -3453,7 +3605,9 @@ MU_INLINE mu_shape mu_shape_lsystem(const mu_lsystem_config *cfg,
                 if (t->ring == MU_SHAPE_NONE) break;
             }
 
-            t->pos = mu_vec3_add(t->pos, mu_vec3_scale(t->head, len));
+            mu_vec3 scale15;
+            mu_vec3_scale(scale15, t->head, len);
+            mu_vec3_add(t->pos, t->pos, scale15);
             vdist += len;
             newring = mu_lsystem__ring(&s, t, slices, vdist);
             if (newring == MU_SHAPE_NONE) break;
@@ -3463,12 +3617,15 @@ MU_INLINE mu_shape mu_shape_lsystem(const mu_lsystem_config *cfg,
                 /* decide the winding once, from the first bridge: outward means
                  * the quad normal agrees with the radial direction */
                 mu_vec3 u, w;
-                mu_lsystem__basis(t->head, t->up, &u, &w);
+                mu_lsystem__basis(t->head, t->up, u, w);
+                mu_vec3 sub23;
+                mu_vec3_sub(sub23, s.verts[t->ring + 1u].p, s.verts[t->ring].p);
+                mu_vec3 sub24;
+                mu_vec3_sub(sub24, s.verts[newring].p, s.verts[t->ring].p);
+                mu_vec3 cross4;
+                mu_vec3_cross(cross4, sub23, sub24);
                 flip = (mu_vec3_dot(
-                            mu_vec3_cross(mu_vec3_sub(s.verts[t->ring + 1u].p,
-                                                      s.verts[t->ring].p),
-                                          mu_vec3_sub(s.verts[newring].p,
-                                                      s.verts[t->ring].p)),
+                            cross4,
                             w) < 0.0f) ? 1 : 0;
             }
             mu_lsystem__bridge(&s, t->ring, newring, slices, flip);
@@ -3476,34 +3633,38 @@ MU_INLINE mu_shape mu_shape_lsystem(const mu_lsystem_config *cfg,
         }
         else if (c == 'f')
         {
-            t->pos = mu_vec3_add(t->pos, mu_vec3_scale(t->head, len));
+            mu_vec3 scale16;
+            mu_vec3_scale(scale16, t->head, len);
+            mu_vec3_add(t->pos, t->pos, scale16);
             vdist += len;
             t->ring = MU_SHAPE_NONE;
         }
         else if (c == '+' || c == '-')
         {
-            mu_vec3 up = t->up;
-            t->head = mu_lsystem__rotate(t->head, up, c == '+' ? ang : -ang);
-            t->up = up;
+            mu_vec3 up;
+            mu_vec3_copy(up, t->up);
+            mu_lsystem__rotate(t->head, t->head, up, c == '+' ? ang : -ang);
+            mu_vec3_copy(t->up, up);
         }
         else if (c == '&' || c == '^')
         {
             mu_vec3 u, w, axis;
-            mu_lsystem__basis(t->head, t->up, &u, &w);
-            axis = u;
-            t->head = mu_lsystem__rotate(t->head, axis, c == '^' ? ang : -ang);
-            t->up = mu_lsystem__rotate(t->up, axis, c == '^' ? ang : -ang);
+            mu_lsystem__basis(t->head, t->up, u, w);
+            mu_vec3_copy(axis, u);
+            mu_lsystem__rotate(t->head, t->head, axis, c == '^' ? ang : -ang);
+            mu_lsystem__rotate(t->up, t->up, axis, c == '^' ? ang : -ang);
         }
         else if (c == '/' || c == '\\')
         {
             float a = c == '/' ? ang : -ang;
-            t->up = mu_lsystem__rotate(t->up, t->head, a);
+            mu_lsystem__rotate(t->up, t->up, t->head, a);
         }
         else if (c == '|')
         {
-            mu_vec3 axis = t->up;
-            t->head = mu_vec3_scale(t->head, -1.0f);
-            t->up = mu_lsystem__rotate(t->up, axis, MU_SHAPE_PI);
+            mu_vec3 axis;
+            mu_vec3_copy(axis, t->up);
+            mu_vec3_scale(t->head, t->head, -1.0f);
+            mu_lsystem__rotate(t->up, t->up, axis, MU_SHAPE_PI);
             /* the next segment would lie exactly on top of the previous one; end
              * the run instead of emitting a zero-area bridge onto it */
             t->ring = MU_SHAPE_NONE;

@@ -251,14 +251,14 @@ static void test_derivatives(void)
         float x = i * 0.31f - 10.0f;
         mu_noise_sample2 s = mu_noise_simplex1_deriv(x, 21u);
         float fd = (mu_noise_simplex1(x + e, 21u) - mu_noise_simplex1(x - e, 21u)) / (2.0f * e);
-        if (fabsf(fd - s.gradient.x) > 2e-2f)
+        if (fabsf(fd - s.gradient[0]) > 2e-2f)
         {
             ++g_fails;
             if (g_fails <= 25) printf("  FAIL simplex1_deriv at x=%.3f (analytic %.4f, fd %.4f)\n",
-                                      x, s.gradient.x, fd);
+                                      x, s.gradient[0], fd);
         }
         ++g_checks;
-        check_near(s.gradient.y, 0.0f, 1e-9f, "simplex1_deriv: no y derivative");
+        check_near(s.gradient[1], 0.0f, 1e-9f, "simplex1_deriv: no y derivative");
     }
 
     /* 2D/3D simplex derivatives */
@@ -266,8 +266,8 @@ static void test_derivatives(void)
         mu_noise_sample2 s = mu_noise_simplex2_deriv(1.7f, -2.3f, 4u);
         float fx = (mu_noise_simplex2(1.7f + e, -2.3f, 4u) - mu_noise_simplex2(1.7f - e, -2.3f, 4u)) / (2.0f * e);
         float fy = (mu_noise_simplex2(1.7f, -2.3f + e, 4u) - mu_noise_simplex2(1.7f, -2.3f - e, 4u)) / (2.0f * e);
-        check_near(s.gradient.x, fx, 5e-2f, "simplex2_deriv: dx matches central difference");
-        check_near(s.gradient.y, fy, 5e-2f, "simplex2_deriv: dy matches central difference");
+        check_near(s.gradient[0], fx, 5e-2f, "simplex2_deriv: dx matches central difference");
+        check_near(s.gradient[1], fy, 5e-2f, "simplex2_deriv: dy matches central difference");
     }
 
     /* dfbm2 must be the derivative of the fbm sum it returns */
@@ -279,7 +279,7 @@ static void test_derivatives(void)
 
         float fx = (mu_noise_fbm2(mu_noise_simplex2, x + e, y, 8u, 4, 2.0f, 0.5f) -
                     mu_noise_fbm2(mu_noise_simplex2, x - e, y, 8u, 4, 2.0f, 0.5f)) / (2.0f * e);
-        check_near(d.gradient.x, fx, 0.2f, "dfbm2: dx matches central difference of fbm2");
+        check_near(d.gradient[0], fx, 0.2f, "dfbm2: dx matches central difference of fbm2");
     }
 
     /* dfbm3: value consistency only (the 3D chain rule is the same code) */
@@ -288,7 +288,7 @@ static void test_derivatives(void)
         mu_noise_sample3 d = mu_noise_dfbm3(mu_noise_simplex3_deriv, x, y, z, 8u, 3, 2.0f, 0.5f);
         float v0 = mu_noise_fbm3(mu_noise_simplex3, x, y, z, 8u, 3, 2.0f, 0.5f);
         check_near(d.value, v0, 1e-4f, "dfbm3: value equals fbm3 of the same base");
-        check(finite_f(d.gradient.x) && finite_f(d.gradient.y) && finite_f(d.gradient.z),
+        check(finite_f(d.gradient[0]) && finite_f(d.gradient[1]) && finite_f(d.gradient[2]),
               "dfbm3: gradient finite");
     }
 }
@@ -367,16 +367,22 @@ static void test_interop(void)
 {
     /* The noise vector types must BE the mu_math types. If someone re-adds a
      * private struct this fails to compile, which is the point. */
-    mu_vec2 v2 = mu_noise_v2(3.0f, 4.0f);
-    mu_vec3 v3 = mu_noise_v3(1.0f, 2.0f, 2.0f);
-    mu_vec4 v4 = mu_noise_v4(1.0f, 0.0f, 0.0f, 0.0f);
+    mu_vec2 v2;
+    mu_vec3 v3;
+    mu_vec4 v4;
+    mu_noise_v2(v2, 3.0f, 4.0f);
+    mu_noise_v3(v3, 1.0f, 2.0f, 2.0f);
+    mu_noise_v4(v4, 1.0f, 0.0f, 0.0f, 0.0f);
 
     check_near(mu_vec2_length(v2), 5.0f, 1e-6f, "interop: mu_vec2_length on a noise vec2");
     check_near(mu_vec3_length(v3), 3.0f, 1e-6f, "interop: mu_vec3_length on a noise vec3");
     check_near(mu_vec4_length(v4), 1.0f, 1e-6f, "interop: mu_vec4_length on a noise vec4");
 
     {
-        mu_vec3 n = mu_vec3_normalize(mu_noise_grad3_from_hash(5u));
+        mu_vec3 gradient;
+        mu_vec3 n;
+        mu_noise_grad3_from_hash(gradient, 5u);
+        mu_vec3_normalize(n, gradient);
         check_near(mu_vec3_length(n), 1.0f, 1e-5f, "interop: normalising a noise gradient works");
     }
 

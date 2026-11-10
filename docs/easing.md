@@ -10,7 +10,7 @@ reach, the input it does not clamp, and the derivatives it does not have.
 #include "mu/mu_easing.h"          /* needs mu_macros.h, mu_math.h, mu_simd.h */
 
 float a = mu_ease_out_cubic(t);                     /* the par call, renamed       */
-mu_vec3 p = mu_ease_vec3(MU_EASE_OUT_BACK, p0, p1, t);
+mu_vec3 p; mu_ease_vec3(p, MU_EASE_OUT_BACK, p0, p1, t);   /* out-param, like mu_math.h */
 float v = mu_ease_velocity(MU_EASE_OUT_ELASTIC, t); /* exact f'(t), not a difference */
 ```
 
@@ -254,7 +254,7 @@ float l  = mu_ease_loop(t);              /* wrap into [0,1)        */
 float pp = mu_ease_pingpong(t);          /* 0 -> 1 -> 0 per period */
 float u  = mu_ease_remap(t, 0.2f, 0.8f); /* -> [0,1]               */
 float a  = mu_ease_lerp(kind, 3.0f, 9.0f, t);
-mu_vec3 v = mu_ease_vec3(kind, from, to, t);   /* what most call sites want */
+mu_vec3 v; mu_ease_vec3(v, kind, from, to, t);   /* what most call sites want */
 ```
 
 `remap` with an empty range returns 0; `loop`/`pingpong` handle negative and

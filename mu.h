@@ -75,6 +75,7 @@
 #include "mu/mu_fixed.h"
 #include "mu/mu_save.h"
 #include "mu/mu_log.h"
+#include "mu/mu_input.h"
 
 /* mu/mu_bench.h is deliberately NOT in the umbrella: it defines a benchmark
  * registry and a main(), so it belongs in exactly one translation unit of a

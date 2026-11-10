@@ -17,6 +17,50 @@ no global state. Every generator and operation is `MU_INLINE`, so the usual
 `MU_STATIC` / `MU_API` reach for single-TU or shared-library builds applies
 exactly as it does for the rest of `mu/`.
 
+## Migrated off `mu_math_legacy.h` (2026-11)
+
+`mu_shapes.h` used to include `mu_math_legacy.h` — the struct-based
+(`v.x`, return-by-value) front end kept for code that had not moved to
+`mu_math.h` yet. That made `#include "mu.h"` fail outright: the umbrella pulls in
+`mu_math.h` first, so the legacy `struct mu_vec3` collided with the array-based
+`typedef float mu_vec3[3]`.
+
+The header now builds on `mu_math.h` directly, in its own idiom:
+
+```c
+mu_vec3 d;                                     /* arrays, not structs        */
+mu_vec3_sub(d, path[i + 1], path[i]);          /* output first               */
+float l2 = mu_vec3_length2(d);                 /* scalars still return       */
+mu_vec3 p0; mu_vec3_copy(p0, s->verts[0].p);   /* copies, not assignment     */
+```
+
+Three consequences worth knowing:
+
+- **Callbacks return through an out-parameter.** `mu_shape_fn` is now
+  `void (*)(mu_vec3 out, float u, float v, void *user)`, matching
+  `mu_field_fn`-style callbacks elsewhere in `mu/`. Same for the internal
+  `mu_shape__grid_pos` / `mu_shape__grid_cross` / `mu_lsystem__rotate`.
+- **In-place algebra where the element is independent.** `mu_vec3_normalize(n, n)`
+  or `mu_vec3_add(p, p, t)` is used deliberately: both read their inputs before
+  writing the same index. Cross products through an alias are *not* safe and
+  always go through a temporary.
+- **`mu_ease_vec3` moved too** (`void mu_ease_vec3(mu_vec3 out, kind, a, b, t)`),
+  because it was the last `mu_vec3` in `mu_easing.h` and the umbrella includes
+  that header as well.
+
+Verification that this is a port and not a rewrite:
+
+| check | result |
+|---|---|
+| `perf_test/test_shapes.c` | **398 checks, 0 failures** (identical to the legacy build) |
+| 26-shape geometry digest (every generator + transform/weld/normals, FNV over the vertex and index arrays) | **bit-identical** to the legacy build |
+| `perf_test/bench_shapes.c` vs the legacy build, same machine | no change: tube 87.3 vs 87.7 µs, L-system 752 vs 752 µs, SDF sphere 9.43 vs 9.44 ms, Loop 2.481 vs 2.468 ms |
+| `#include "mu.h"` | now compiles |
+
+At the time of this port `mu_noise_math.h` and `mu_geometric_algebra.h` were
+still on the legacy header; both moved over afterwards, so `mu_math_legacy.h` is
+gone from the tree entirely. See [math.md](math.md) for that migration.
+
 ## What `par_shapes` does, and what this does instead
 
 Same single-header style, same "return a mesh by value" feel, same OBJ export.

@@ -86,6 +86,12 @@ that matches bit for bit).
 
 ### 2. `mu_input.h` — actions, buffering, chords
 
+> **Status:** the core shipped (`mu/mu_input.h`, doc: [input.md](input.md)) —
+> device state, ordered timestamped events, tap latch, actions-as-data maps,
+> per-axis deadzones, stateless repeat, plus the GLFW adapter in
+> `demos/common/`. Still open from the sketch below: chord resolution, buffer /
+> coyote windows in ticks, and record/replay of the event ring.
+
 *Gap:* nothing. Every game writes this badly, and the parts that make a game
 *feel* good (buffer windows, coyote time, chords) are exactly the parts that
 get left out.

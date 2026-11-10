@@ -260,6 +260,12 @@ int main(void)
             check_le(what, worst, 1e-3);
         }
         check(used >= 45, "velocity was compared at most sample points");
+        /* Every one of the 59 samples (i = 1..59) is either compared or
+         * classified non-smooth; only the seam, which exists for in_out alone,
+         * is neither. A new `continue` that forgets to classify itself shows up
+         * here instead of silently shrinking the sample set. */
+        check(used + skipped == 59 - (phase == 2),
+              "every sample point was either used or classified non-smooth");
     }
 
     /* The seam is the one point where a piecewise in_out can hide a factor of two
@@ -710,14 +716,15 @@ int main(void)
     check_le("lerp with in_out_cubic lands on the target",
              fabs((double)mu_ease_lerp(MU_EASE_IN_OUT_CUBIC, 3.0f, -1.0f, 1.0f) + 1.0), 1e-6);
     {
-        mu_vec3 a = mu_vec3_make(0.0f, 10.0f, -2.0f);
-        mu_vec3 b = mu_vec3_make(4.0f, -10.0f, 2.0f);
-        mu_vec3 m = mu_ease_vec3(MU_EASE_LINEAR, a, b, 0.5f);
-        check_le("vec3 lerp x", fabs((double)m.x - 2.0), 1e-6);
-        check_le("vec3 lerp y", fabs((double)m.y), 1e-6);
-        check_le("vec3 lerp z", fabs((double)m.z), 1e-6);
-        check_le("vec3 easing ends on b",
-                 fabs((double)mu_ease_vec3(MU_EASE_OUT_BACK, a, b, 1.0f).x - 4.0), 1e-5);
+        mu_vec3 a = {0.0f, 10.0f, -2.0f};
+        mu_vec3 b = {4.0f, -10.0f, 2.0f};
+        mu_vec3 m, end;
+        mu_ease_vec3(m, MU_EASE_LINEAR, a, b, 0.5f);
+        check_le("vec3 lerp x", fabs((double)m[0] - 2.0), 1e-6);
+        check_le("vec3 lerp y", fabs((double)m[1]), 1e-6);
+        check_le("vec3 lerp z", fabs((double)m[2]), 1e-6);
+        mu_ease_vec3(end, MU_EASE_OUT_BACK, a, b, 1.0f);
+        check_le("vec3 easing ends on b", fabs((double)end[0] - 4.0), 1e-5);
     }
     check_le("velocity_family agrees with velocity",
              fabs((double)mu_ease_velocity_family(2, 2, 0.37f) -

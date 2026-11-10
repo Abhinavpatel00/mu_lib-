@@ -108,7 +108,7 @@
  */
 
 #include "mu_macros.h"
-#include "mu_math_legacy.h"
+#include "mu_math.h"
 #include "mu_simd.h"
 
 #include <math.h>
@@ -988,12 +988,13 @@ MU_INLINE float mu_ease_lerp(mu_ease_kind k, float a, float b, float t)
     return a + (b - a) * mu_ease_apply(k, t);
 }
 
-MU_INLINE mu_vec3 mu_ease_vec3(mu_ease_kind k, mu_vec3 a, mu_vec3 b, float t)
+MU_INLINE void mu_ease_vec3(mu_vec3 out, mu_ease_kind k,
+                            const mu_vec3 a, const mu_vec3 b, float t)
 {
     float e = mu_ease_apply(k, t);
-    return mu_vec3_make(a.x + (b.x - a.x) * e,
-                        a.y + (b.y - a.y) * e,
-                        a.z + (b.z - a.z) * e);
+    mu_vec3_make(out, a[0] + (b[0] - a[0]) * e,
+                      a[1] + (b[1] - a[1]) * e,
+                      a[2] + (b[2] - a[2]) * e);
 }
 
 /* ==========================================================================

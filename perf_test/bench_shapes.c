@@ -50,8 +50,8 @@ static mu_shape *subject_ico4(void)
 static float sdf_gyroid(mu_vec3 p, void *user)
 {
     float s = *(const float *)user;
-    return sinf(p.x * s) * cosf(p.y * s) + sinf(p.y * s) * cosf(p.z * s) +
-           sinf(p.z * s) * cosf(p.x * s);
+    return sinf(p[0] * s) * cosf(p[1] * s) + sinf(p[1] * s) * cosf(p[2] * s) +
+           sinf(p[2] * s) * cosf(p[0] * s);
 }
 
 /* ---------- generation ---------- */
@@ -138,7 +138,7 @@ MU_BENCH(gen, tube_256x12)
     for (i = 0; i < 256; ++i)
     {
         float t = (float)i / 255.0f;
-        path[i] = mu_vec3_make(sinf(t * 6.0f), t * 4.0f, cosf(t * 5.0f));
+        memcpy(path[i], (mu_vec3){sinf(t * 6.0f), t * 4.0f, cosf(t * 5.0f)}, sizeof(path[i]));
     }
 
     MU_BENCH_ITERATE(i)
@@ -159,7 +159,7 @@ MU_BENCH(gen, extrude_star_64)
     {
         float a = MU_SHAPE_TAU * (float)j / 64.0f;
         float r = (j & 1) ? 0.6f : 1.0f;
-        poly[j] = mu_vec2_make(r * cosf(a), r * sinf(a));
+        memcpy(poly[j], (mu_vec2){r * cosf(a), r * sinf(a)}, sizeof(poly[j]));
     }
 
     MU_BENCH_ITERATE(i)
@@ -211,14 +211,14 @@ MU_BENCH(sdf, sphere_res32)
     mu_sdf_sphere_t sp;
     uint32_t i;
 
-    sp.c = mu_vec3_make(0.0f, 0.0f, 0.0f);
+    memcpy(sp.c, (mu_vec3){0.0f, 0.0f, 0.0f}, sizeof(sp.c));
     sp.r = 1.0f;
 
     MU_BENCH_ITERATE(i)
     {
         mu_shape s = mu_shape_from_sdf(mu_sdf_sphere, &sp,
-                                       mu_vec3_make(-1.4f, -1.4f, -1.4f),
-                                       mu_vec3_make(1.4f, 1.4f, 1.4f), 32, 0.0f);
+                                       (mu_vec3){-1.4f, -1.4f, -1.4f},
+                                       (mu_vec3){1.4f, 1.4f, 1.4f}, 32, 0.0f);
         g_sink += s.ntriangles;
         mu_shape_free(&s);
     }
@@ -232,8 +232,8 @@ MU_BENCH(sdf, gyroid_res24)
     MU_BENCH_ITERATE(i)
     {
         mu_shape s = mu_shape_from_sdf(sdf_gyroid, &amp,
-                                       mu_vec3_make(-2.0f, -2.0f, -2.0f),
-                                       mu_vec3_make(2.0f, 2.0f, 2.0f), 24, 0.0f);
+                                       (mu_vec3){-2.0f, -2.0f, -2.0f},
+                                       (mu_vec3){2.0f, 2.0f, 2.0f}, 24, 0.0f);
         g_sink += s.ntriangles;
         mu_shape_free(&s);
     }
@@ -275,7 +275,7 @@ MU_BENCH(op, compute_normals_sphere_512x256)
     MU_BENCH_ITERATE(i)
     {
         mu_shape_compute_normals(subject_big());
-        MU_BENCH_DO_NOT_OPTIMIZE(g_big.verts[0].n.x);
+        MU_BENCH_DO_NOT_OPTIMIZE(g_big.verts[0].n[0]);
     }
 }
 
@@ -382,9 +382,9 @@ static void ref_weld_map_27(const mu_shape *s, float eps, uint32_t *map)
 
     for (i = 0; i < s->npoints; ++i)
     {
-        int32_t cx = (int32_t)floorf(s->verts[i].p.x / eps);
-        int32_t cy = (int32_t)floorf(s->verts[i].p.y / eps);
-        int32_t cz = (int32_t)floorf(s->verts[i].p.z / eps);
+        int32_t cx = (int32_t)floorf(s->verts[i].p[0] / eps);
+        int32_t cy = (int32_t)floorf(s->verts[i].p[1] / eps);
+        int32_t cz = (int32_t)floorf(s->verts[i].p[2] / eps);
         uint32_t best = i;
         int dx, dy, dz;
 
@@ -396,7 +396,9 @@ static void ref_weld_map_27(const mu_shape *s, float eps, uint32_t *map)
             uint32_t c = head[b];
             while (c != MU_SHAPE_NONE)
             {
-                if (mu_vec3_length2(mu_vec3_sub(s->verts[c].p, s->verts[i].p)) <= eps2)
+                mu_vec3 sub;
+                mu_vec3_sub(sub, s->verts[c].p, s->verts[i].p);
+                if (mu_vec3_length2(sub) <= eps2)
                 { best = map[c]; break; }
                 c = next[c];
             }
@@ -459,7 +461,7 @@ static int ref_subdivide_offsetkey(mu_shape *s)
         mu_shape_free(&out); mu_shape__edges_free(&e);
         return 0;
     }
-    for (i = 0; i < s->npoints; ++i) { vsum[i] = mu_vec3_zero(); deg[i] = 0; }
+    for (i = 0; i < s->npoints; ++i) { mu_vec3_zero(vsum[i]); deg[i] = 0; }
     for (i = 0; i < e.mask + 1u; ++i) emap[i] = MU_SHAPE_NONE;
 
     {
@@ -469,20 +471,37 @@ static int ref_subdivide_offsetkey(mu_shape *s)
             mu_shape__edge *cur = &e.slots[i];
             mu_vec3 p;
             if (cur->key == 0u) continue;
-            vsum[cur->v0] = mu_vec3_add(vsum[cur->v0], s->verts[cur->v1].p);
-            vsum[cur->v1] = mu_vec3_add(vsum[cur->v1], s->verts[cur->v0].p);
+            mu_vec3 add;
+            mu_vec3_add(add, vsum[cur->v0], s->verts[cur->v1].p);
+            memcpy(vsum[cur->v0], add, sizeof(vsum[cur->v0]));
+            mu_vec3 add1;
+            mu_vec3_add(add1, vsum[cur->v1], s->verts[cur->v0].p);
+            memcpy(vsum[cur->v1], add1, sizeof(vsum[cur->v1]));
             ++deg[cur->v0];
             ++deg[cur->v1];
             if (cur->count == 2u)
-                p = mu_vec3_add(
-                        mu_vec3_scale(mu_vec3_add(s->verts[cur->v0].p,
-                                                  s->verts[cur->v1].p), 0.375f),
-                        mu_vec3_scale(mu_vec3_add(s->verts[cur->opp[0]].p,
-                                                  s->verts[cur->opp[1]].p), 0.125f));
+            {
+                mu_vec3 add2;
+                mu_vec3_add(add2, s->verts[cur->v0].p, s->verts[cur->v1].p);
+                mu_vec3 scale;
+                mu_vec3_scale(scale, add2, 0.375f);
+                mu_vec3 add3;
+                mu_vec3_add(add3, s->verts[cur->opp[0]].p, s->verts[cur->opp[1]].p);
+                mu_vec3 scale1;
+                mu_vec3_scale(scale1, add3, 0.125f);
+                mu_vec3 add4;
+                mu_vec3_add(add4, scale, scale1);
+                memcpy(p, add4, sizeof(p));
+            }
             else
-                p = mu_vec3_scale(mu_vec3_add(s->verts[cur->v0].p,
-                                              s->verts[cur->v1].p), 0.5f);
-            vnew[k] = p;
+            {
+                mu_vec3 add5;
+                mu_vec3_add(add5, s->verts[cur->v0].p, s->verts[cur->v1].p);
+                mu_vec3 scale2;
+                mu_vec3_scale(scale2, add5, 0.5f);
+                memcpy(p, scale2, sizeof(p));
+            }
+            memcpy(vnew[k], p, sizeof(vnew[k]));
             emap[i] = k;
             ++k;
         }
@@ -490,19 +509,24 @@ static int ref_subdivide_offsetkey(mu_shape *s)
 
     for (i = 0; i < s->npoints; ++i)
     {
-        if (deg[i] == 0) { vnew[i] = s->verts[i].p; continue; }
+        if (deg[i] == 0) { mu_vec3_copy(vnew[i], s->verts[i].p); continue; }
         {
             float beta = (deg[i] == 3u) ? 3.0f / 16.0f : 3.0f / (8.0f * (float)deg[i]);
             float keep = 1.0f - beta * (float)deg[i];
-            vnew[i] = mu_vec3_add(mu_vec3_scale(s->verts[i].p, keep),
-                                  mu_vec3_scale(vsum[i], beta));
+            mu_vec3 scale3;
+            mu_vec3_scale(scale3, s->verts[i].p, keep);
+            mu_vec3 scale4;
+            mu_vec3_scale(scale4, vsum[i], beta);
+            mu_vec3 add6;
+            mu_vec3_add(add6, scale3, scale4);
+            memcpy(vnew[i], add6, sizeof(vnew[i]));
         }
     }
 
     for (i = 0; i < nv; ++i)
     {
         float u = 0.0f, v = 0.0f;
-        if (i < s->npoints) { u = s->verts[i].uv.x; v = s->verts[i].uv.y; }
+        if (i < s->npoints) { u = s->verts[i].uv[0]; v = s->verts[i].uv[1]; }
         mu_shape_add_vertex(&out, vnew[i], u, v);
     }
 

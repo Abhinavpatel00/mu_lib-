@@ -6,9 +6,6 @@
  * Data is already in the layout the GPU expects — direct memcpy to Vulkan
  * uniform buffers, push constants, and vertex buffers.
  *
- * The old struct-based API (mu_vec3.x, mu_mat4.col[0]) lives in
- * mu_math_legacy.h for code that hasn't been migrated yet.
- *
  * TYPE LAYOUT (column-major, matches GLSL/Slang exactly):
  *   mu_vec2  = float[2]     8 B   packed
  *   mu_vec3  = float[3]    12 B   packed
@@ -704,6 +701,174 @@ static inline void mu_mat4_transform_dir(float* r, const float* m, const float* 
 }
 
 /* ---- hot path: matrix pre-loaded into registers ---- */
+
+/* ---- affine multiply ---------------------------------------------------
+ * B's fourth row is (0,0,0,1): the terms that would carry A's translation
+ * into columns 0..2 are B[3][j] * A_col3 with B[3][j] == 0, so those three
+ * adds disappear (9 FMA instead of 12). Column 3 is the transformed
+ * translation and keeps its add. Result is bit-identical to mu_mat4_mul for an
+ * affine B (the dropped terms are exact zeros). */
+static inline void mu_mat4_mul_affine(float* dst, const float* a, const float* b)
+{
+#if defined(MU_RAW_SSE)
+#if defined(MU_RAW_FMA)
+#  define MU__FMA(a,b,c) _mm_fmadd_ps((a),(b),(c))
+#else
+#  define MU__FMA(a,b,c) _mm_add_ps(_mm_mul_ps((a),(b)),(c))
+#endif
+#  define MU__SX(v) _mm_shuffle_ps((v),(v),_MM_SHUFFLE(0,0,0,0))
+#  define MU__SY(v) _mm_shuffle_ps((v),(v),_MM_SHUFFLE(1,1,1,1))
+#  define MU__SZ(v) _mm_shuffle_ps((v),(v),_MM_SHUFFLE(2,2,2,2))
+    __m128 r0 = _mm_loadu_ps(&b[0]);
+    __m128 r1 = _mm_loadu_ps(&b[4]);
+    __m128 r2 = _mm_loadu_ps(&b[8]);
+    __m128 r3 = _mm_loadu_ps(&b[12]);
+    __m128 l0 = _mm_loadu_ps(&a[0]);
+    __m128 l1 = _mm_loadu_ps(&a[4]);
+    __m128 l2 = _mm_loadu_ps(&a[8]);
+    __m128 t  = _mm_loadu_ps(&a[12]);
+    __m128 v0, v1, v2, v3;
+
+    v0 = MU__FMA(MU__SY(r0), l1, _mm_mul_ps(MU__SX(r0), l0));
+    v1 = MU__FMA(MU__SY(r1), l1, _mm_mul_ps(MU__SX(r1), l0));
+    v2 = MU__FMA(MU__SY(r2), l1, _mm_mul_ps(MU__SX(r2), l0));
+
+    v0 = MU__FMA(MU__SZ(r0), l2, v0);
+    v1 = MU__FMA(MU__SZ(r1), l2, v1);
+    v2 = MU__FMA(MU__SZ(r2), l2, v2);
+
+    v3 = MU__FMA(MU__SZ(r3), l2,
+                 MU__FMA(MU__SY(r3), l1, _mm_mul_ps(MU__SX(r3), l0)));
+    v3 = _mm_add_ps(v3, t);
+
+    _mm_storeu_ps(&dst[0], v0);
+    _mm_storeu_ps(&dst[4], v1);
+    _mm_storeu_ps(&dst[8], v2);
+    _mm_storeu_ps(&dst[12], v3);
+#  undef MU__SX
+#  undef MU__SY
+#  undef MU__SZ
+#  undef MU__FMA
+#else
+    mu_mat4_mul(a, b, dst);
+#endif
+}
+
+/* ---- 4-wide palette (lane == matrix) ---------------------------------- */
+static inline void mu_mat4x4_pack(mu_mat4x4* out, const float* m, size_t stride_bytes)
+{
+#if defined(MU_RAW_AVX512)
+    /* Four AoS matrices -> lane=matrix form is a 4x4 transpose at 128-bit
+     * granularity: 4 loads + 8 vshuff32x4. _mm512_insertf32x4 costs 12
+     * inserts, and that difference is the whole margin of the palette bench. */
+    __m512 a0 = _mm512_loadu_ps((const float*)(const void*)((const char*)m));
+    __m512 a1 = _mm512_loadu_ps((const float*)(const void*)((const char*)m + stride_bytes));
+    __m512 a2 = _mm512_loadu_ps((const float*)(const void*)((const char*)m + 2 * stride_bytes));
+    __m512 a3 = _mm512_loadu_ps((const float*)(const void*)((const char*)m + 3 * stride_bytes));
+    __m512 t0 = _mm512_shuffle_f32x4(a0, a1, _MM_SHUFFLE(1, 0, 1, 0));
+    __m512 t1 = _mm512_shuffle_f32x4(a0, a1, _MM_SHUFFLE(3, 2, 3, 2));
+    __m512 t2 = _mm512_shuffle_f32x4(a2, a3, _MM_SHUFFLE(1, 0, 1, 0));
+    __m512 t3 = _mm512_shuffle_f32x4(a2, a3, _MM_SHUFFLE(3, 2, 3, 2));
+
+    out->col[0] = _mm512_shuffle_f32x4(t0, t2, _MM_SHUFFLE(2, 0, 2, 0));
+    out->col[1] = _mm512_shuffle_f32x4(t0, t2, _MM_SHUFFLE(3, 1, 3, 1));
+    out->col[2] = _mm512_shuffle_f32x4(t1, t3, _MM_SHUFFLE(2, 0, 2, 0));
+    out->col[3] = _mm512_shuffle_f32x4(t1, t3, _MM_SHUFFLE(3, 1, 3, 1));
+#else
+    size_t k;
+    for (k = 0; k < 4; ++k)
+        memcpy(out->m[k], (const void*)((const char*)m + k * stride_bytes), sizeof(mu_mat4));
+#endif
+}
+
+static inline void mu_mat4x4_unpack(float* m, size_t stride_bytes, const mu_mat4x4* p)
+{
+#if defined(MU_RAW_AVX512)
+    /* the same lane transpose in reverse: it is its own inverse */
+    __m512 t0 = _mm512_shuffle_f32x4(p->col[0], p->col[1], _MM_SHUFFLE(1, 0, 1, 0));
+    __m512 t1 = _mm512_shuffle_f32x4(p->col[0], p->col[1], _MM_SHUFFLE(3, 2, 3, 2));
+    __m512 t2 = _mm512_shuffle_f32x4(p->col[2], p->col[3], _MM_SHUFFLE(1, 0, 1, 0));
+    __m512 t3 = _mm512_shuffle_f32x4(p->col[2], p->col[3], _MM_SHUFFLE(3, 2, 3, 2));
+
+    _mm512_storeu_ps((float*)(void*)((char*)m),
+                     _mm512_shuffle_f32x4(t0, t2, _MM_SHUFFLE(2, 0, 2, 0)));
+    _mm512_storeu_ps((float*)(void*)((char*)m + stride_bytes),
+                     _mm512_shuffle_f32x4(t0, t2, _MM_SHUFFLE(3, 1, 3, 1)));
+    _mm512_storeu_ps((float*)(void*)((char*)m + 2 * stride_bytes),
+                     _mm512_shuffle_f32x4(t1, t3, _MM_SHUFFLE(2, 0, 2, 0)));
+    _mm512_storeu_ps((float*)(void*)((char*)m + 3 * stride_bytes),
+                     _mm512_shuffle_f32x4(t1, t3, _MM_SHUFFLE(3, 1, 3, 1)));
+#else
+    size_t k;
+    for (k = 0; k < 4; ++k)
+        memcpy((void*)((char*)m + k * stride_bytes), p->m[k], sizeof(mu_mat4));
+#endif
+}
+
+static inline void mu_mat4x4_mul(mu_mat4x4* dst, const mu_mat4x4* a, const mu_mat4x4* b)
+{
+#if defined(MU_RAW_AVX512)
+    const __m512i k0 = _mm512_set_epi32(12,12,12,12, 8, 8, 8, 8, 4, 4, 4, 4, 0, 0, 0, 0);
+    const __m512i k1 = _mm512_set_epi32(13,13,13,13, 9, 9, 9, 9, 5, 5, 5, 5, 1, 1, 1, 1);
+    const __m512i k2 = _mm512_set_epi32(14,14,14,14,10,10,10,10, 6, 6, 6, 6, 2, 2, 2, 2);
+    const __m512i k3 = _mm512_set_epi32(15,15,15,15,11,11,11,11, 7, 7, 7, 7, 3, 3, 3, 3);
+    __m512 d0, d1, d2, d3;
+
+    d0 = _mm512_mul_ps(a->col[0], _mm512_permutexvar_ps(k0, b->col[0]));
+    d1 = _mm512_mul_ps(a->col[0], _mm512_permutexvar_ps(k0, b->col[1]));
+    d2 = _mm512_mul_ps(a->col[0], _mm512_permutexvar_ps(k0, b->col[2]));
+    d3 = _mm512_mul_ps(a->col[0], _mm512_permutexvar_ps(k0, b->col[3]));
+
+    d0 = _mm512_fmadd_ps(a->col[1], _mm512_permutexvar_ps(k1, b->col[0]), d0);
+    d1 = _mm512_fmadd_ps(a->col[1], _mm512_permutexvar_ps(k1, b->col[1]), d1);
+    d2 = _mm512_fmadd_ps(a->col[1], _mm512_permutexvar_ps(k1, b->col[2]), d2);
+    d3 = _mm512_fmadd_ps(a->col[1], _mm512_permutexvar_ps(k1, b->col[3]), d3);
+
+    d0 = _mm512_fmadd_ps(a->col[2], _mm512_permutexvar_ps(k2, b->col[0]), d0);
+    d1 = _mm512_fmadd_ps(a->col[2], _mm512_permutexvar_ps(k2, b->col[1]), d1);
+    d2 = _mm512_fmadd_ps(a->col[2], _mm512_permutexvar_ps(k2, b->col[2]), d2);
+    d3 = _mm512_fmadd_ps(a->col[2], _mm512_permutexvar_ps(k2, b->col[3]), d3);
+
+    d0 = _mm512_fmadd_ps(a->col[3], _mm512_permutexvar_ps(k3, b->col[0]), d0);
+    d1 = _mm512_fmadd_ps(a->col[3], _mm512_permutexvar_ps(k3, b->col[1]), d1);
+    d2 = _mm512_fmadd_ps(a->col[3], _mm512_permutexvar_ps(k3, b->col[2]), d2);
+    d3 = _mm512_fmadd_ps(a->col[3], _mm512_permutexvar_ps(k3, b->col[3]), d3);
+
+    dst->col[0] = d0;
+    dst->col[1] = d1;
+    dst->col[2] = d2;
+    dst->col[3] = d3;
+#else
+    size_t k;
+    for (k = 0; k < 4; ++k)
+        mu_mat4_mul(a->m[k], b->m[k], dst->m[k]);
+#endif
+}
+
+/* N independent multiplies, four at a time where the machine can: one multiply
+ * is latency-bound, four saturate the FMA pipes. */
+static inline void mu_mat4_mul_batch(float* dst, size_t stride_d,
+                                     const float* a, size_t stride_a,
+                                     const float* b, size_t stride_b, size_t count)
+{
+    size_t i = 0;
+
+#if defined(MU_RAW_AVX512)
+    for (; i + 4 <= count; i += 4)
+    {
+        mu_mat4x4 pa, pb, pd;
+
+        mu_mat4x4_pack(&pa, (const float*)(const void*)((const char*)a + i * stride_a), stride_a);
+        mu_mat4x4_pack(&pb, (const float*)(const void*)((const char*)b + i * stride_b), stride_b);
+        mu_mat4x4_mul(&pd, &pa, &pb);
+        mu_mat4x4_unpack((float*)(void*)((char*)dst + i * stride_d), stride_d, &pd);
+    }
+#endif
+    for (; i < count; ++i)
+        mu_mat4_mul((const float*)(const void*)((const char*)a + i * stride_a),
+                    (const float*)(const void*)((const char*)b + i * stride_b),
+                    (float*)(void*)((char*)dst + i * stride_d));
+}
 
 static inline mu_mat4_hot mu_mat4_make_hot(const float* m)
 {

@@ -132,8 +132,8 @@
 
       mu_noise_sample2 s = mu_noise_perlin2_deriv(12.3f, 9.1f, 1337u);
       float h = s.value;          // scalar height
-      float gx = s.gradient.x;    // dh/dx
-      float gy = s.gradient.y;    // dh/dy
+      float gx = s.gradient[0];    // dh/dx
+      float gy = s.gradient[1];    // dh/dy
 
       float h4 = mu_noise_simplex4(1.0f, 2.0f, 3.0f, 4.0f, 1337u);
 
@@ -149,7 +149,7 @@ extern "C" {
 #endif
 
 #include "mu_macros.h"
-#include "mu_math_legacy.h"   /* mu_vec2/3/4, mu_vec*_dot/add/sub/scale: one math layer */
+#include "mu_math.h"
 
 /* ------------------------------------------------------------------------- */
 /* Basic structs and enums                                                   */
@@ -225,9 +225,9 @@ typedef float (*mu_noise_fn2)(float x, float y, uint32_t seed);
 typedef float (*mu_noise_fn3)(float x, float y, float z, uint32_t seed);
 typedef float (*mu_noise_fn4)(float x, float y, float z, float w, uint32_t seed);
 
-typedef mu_noise_vec2 (*mu_noise_vfn2)(float x, float y, uint32_t seed);
-typedef mu_noise_vec3 (*mu_noise_vfn3)(float x, float y, float z, uint32_t seed);
-typedef mu_noise_vec4 (*mu_noise_vfn4)(float x, float y, float z, float w, uint32_t seed);
+typedef void (*mu_noise_vfn2)(mu_noise_vec2 out, float x, float y, uint32_t seed);
+typedef void (*mu_noise_vfn3)(mu_noise_vec3 out, float x, float y, float z, uint32_t seed);
+typedef void (*mu_noise_vfn4)(mu_noise_vec4 out, float x, float y, float z, float w, uint32_t seed);
 
 typedef mu_noise_sample2 (*mu_noise_dfn2)(float x, float y, uint32_t seed);
 typedef mu_noise_sample3 (*mu_noise_dfn3)(float x, float y, float z, uint32_t seed);
@@ -300,19 +300,24 @@ MU_INLINE float mu_noise_remap_neg1_pos1_to_0_1(float v)
     return 0.5f * v + 0.5f;
 }
 
-MU_INLINE mu_noise_vec2 mu_noise_v2(float x, float y)
+/* The vec helpers below are thin, out-parameter wrappers over mu_math.h so that
+ * noise code reads in vector terms without depending on anything outside this
+ * header.  They allocate nothing: every result is written through `out`, which
+ * is what lets callers chain them into caller-owned temporaries. */
+
+MU_INLINE void mu_noise_v2(mu_noise_vec2 out, float x, float y)
 {
-    return mu_vec2_make(x, y);
+    mu_vec2_make(out, x, y);
 }
 
-MU_INLINE mu_noise_vec3 mu_noise_v3(float x, float y, float z)
+MU_INLINE void mu_noise_v3(mu_noise_vec3 out, float x, float y, float z)
 {
-    return mu_vec3_make(x, y, z);
+    mu_vec3_make(out, x, y, z);
 }
 
-MU_INLINE mu_noise_vec4 mu_noise_v4(float x, float y, float z, float w)
+MU_INLINE void mu_noise_v4(mu_noise_vec4 out, float x, float y, float z, float w)
 {
-    return mu_vec4_make(x, y, z, w);
+    mu_vec4_make(out, x, y, z, w);
 }
 
 MU_INLINE float mu_noise_v2_dot(mu_noise_vec2 a, mu_noise_vec2 b) { return mu_vec2_dot(a, b); }
@@ -323,35 +328,34 @@ MU_INLINE float mu_noise_v2_len(mu_noise_vec2 a) { return mu_vec2_length(a); }
 MU_INLINE float mu_noise_v3_len(mu_noise_vec3 a) { return mu_vec3_length(a); }
 MU_INLINE float mu_noise_v4_len(mu_noise_vec4 a) { return sqrtf(mu_vec4_dot(a, a)); }
 
-MU_INLINE mu_noise_vec2 mu_noise_v2_add(mu_noise_vec2 a, mu_noise_vec2 b) { return mu_vec2_add(a, b); }
-MU_INLINE mu_noise_vec3 mu_noise_v3_add(mu_noise_vec3 a, mu_noise_vec3 b) { return mu_vec3_add(a, b); }
-MU_INLINE mu_noise_vec4 mu_noise_v4_add(mu_noise_vec4 a, mu_noise_vec4 b) { return mu_vec4_add(a, b); }
+MU_INLINE void mu_noise_v2_add(mu_noise_vec2 out, mu_noise_vec2 a, mu_noise_vec2 b) { mu_vec2_add(out, a, b); }
+MU_INLINE void mu_noise_v3_add(mu_noise_vec3 out, mu_noise_vec3 a, mu_noise_vec3 b) { mu_vec3_add(out, a, b); }
+MU_INLINE void mu_noise_v4_add(mu_noise_vec4 out, mu_noise_vec4 a, mu_noise_vec4 b) { mu_vec4_add(out, a, b); }
 
-MU_INLINE mu_noise_vec2 mu_noise_v2_sub(mu_noise_vec2 a, mu_noise_vec2 b) { return mu_vec2_sub(a, b); }
-MU_INLINE mu_noise_vec3 mu_noise_v3_sub(mu_noise_vec3 a, mu_noise_vec3 b) { return mu_vec3_sub(a, b); }
-MU_INLINE mu_noise_vec4 mu_noise_v4_sub(mu_noise_vec4 a, mu_noise_vec4 b) { return mu_vec4_sub(a, b); }
+MU_INLINE void mu_noise_v2_sub(mu_noise_vec2 out, mu_noise_vec2 a, mu_noise_vec2 b) { mu_vec2_sub(out, a, b); }
+MU_INLINE void mu_noise_v3_sub(mu_noise_vec3 out, mu_noise_vec3 a, mu_noise_vec3 b) { mu_vec3_sub(out, a, b); }
+MU_INLINE void mu_noise_v4_sub(mu_noise_vec4 out, mu_noise_vec4 a, mu_noise_vec4 b) { mu_vec4_sub(out, a, b); }
 
-/* Scalar scale, not component-wise: mu_noise_v3_mul(a, s) means a * s. */
-MU_INLINE mu_noise_vec2 mu_noise_v2_mul(mu_noise_vec2 a, float s) { return mu_vec2_scale(a, s); }
-MU_INLINE mu_noise_vec3 mu_noise_v3_mul(mu_noise_vec3 a, float s) { return mu_vec3_scale(a, s); }
-MU_INLINE mu_noise_vec4 mu_noise_v4_mul(mu_noise_vec4 a, float s) { return mu_vec4_scale(a, s); }
+MU_INLINE void mu_noise_v2_mul(mu_noise_vec2 out, mu_noise_vec2 a, float s) { mu_vec2_scale(out, a, s); }
+MU_INLINE void mu_noise_v3_mul(mu_noise_vec3 out, mu_noise_vec3 a, float s) { mu_vec3_scale(out, a, s); }
+MU_INLINE void mu_noise_v4_mul(mu_noise_vec4 out, mu_noise_vec4 a, float s) { mu_vec4_scale(out, a, s); }
 
-MU_INLINE mu_noise_vec3 mu_noise_v3_cross(mu_noise_vec3 a, mu_noise_vec3 b) { return mu_vec3_cross(a, b); }
+MU_INLINE void mu_noise_v3_cross(mu_noise_vec3 out, mu_noise_vec3 a, mu_noise_vec3 b) { mu_vec3_cross(out, a, b); }
 
 /* Epsilon-guarded normalisation: a zero-length vector normalises to zero
  * instead of NaN, which is what noise code wants at lattice corners. */
-MU_INLINE mu_noise_vec2 mu_noise_v2_normalize(mu_noise_vec2 a, float epsilon)
+MU_INLINE void mu_noise_v2_normalize(mu_noise_vec2 out, mu_noise_vec2 a, float epsilon)
 {
     float len = mu_vec2_length(a);
-    if (len <= epsilon) return mu_vec2_make(0.0f, 0.0f);
-    return mu_vec2_scale(a, 1.0f / len);
+    if (len <= epsilon) { mu_vec2_make(out, 0.0f, 0.0f); return; }
+    mu_vec2_scale(out, a, 1.0f / len);
 }
 
-MU_INLINE mu_noise_vec3 mu_noise_v3_normalize(mu_noise_vec3 a, float epsilon)
+MU_INLINE void mu_noise_v3_normalize(mu_noise_vec3 out, mu_noise_vec3 a, float epsilon)
 {
     float len = mu_vec3_length(a);
-    if (len <= epsilon) return mu_vec3_make(0.0f, 0.0f, 0.0f);
-    return mu_vec3_scale(a, 1.0f / len);
+    if (len <= epsilon) { mu_vec3_zero(out); return; }
+    mu_vec3_scale(out, a, 1.0f / len);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -827,39 +831,39 @@ MU_INLINE float mu_noise_value4_periodic(float x, float y, float z, float w,
       It creates directional variation while preserving continuity.
 */
 
-MU_INLINE mu_noise_vec2 mu_noise_grad2_from_hash(uint32_t h)
+MU_INLINE void mu_noise_grad2_from_hash(mu_noise_vec2 out, uint32_t h)
 {
     /* 8 directions around the unit circle (cheap and isotropic enough). */
     switch (h & 7U)
     {
-        case 0U: return mu_noise_v2( 1.0f,  0.0f);
-        case 1U: return mu_noise_v2(-1.0f,  0.0f);
-        case 2U: return mu_noise_v2( 0.0f,  1.0f);
-        case 3U: return mu_noise_v2( 0.0f, -1.0f);
-        case 4U: return mu_noise_v2( 0.70710678f,  0.70710678f);
-        case 5U: return mu_noise_v2(-0.70710678f,  0.70710678f);
-        case 6U: return mu_noise_v2( 0.70710678f, -0.70710678f);
-        default: return mu_noise_v2(-0.70710678f, -0.70710678f);
+        case 0U:  mu_noise_v2(out,  1.0f,  0.0f); break;
+        case 1U:  mu_noise_v2(out, -1.0f,  0.0f); break;
+        case 2U:  mu_noise_v2(out,  0.0f,  1.0f); break;
+        case 3U:  mu_noise_v2(out,  0.0f, -1.0f); break;
+        case 4U:  mu_noise_v2(out,  0.70710678f,  0.70710678f); break;
+        case 5U:  mu_noise_v2(out, -0.70710678f,  0.70710678f); break;
+        case 6U:  mu_noise_v2(out,  0.70710678f, -0.70710678f); break;
+        default:  mu_noise_v2(out, -0.70710678f, -0.70710678f); break;
     }
 }
 
-MU_INLINE mu_noise_vec3 mu_noise_grad3_from_hash(uint32_t h)
+MU_INLINE void mu_noise_grad3_from_hash(mu_noise_vec3 out, uint32_t h)
 {
     /* 12 classic Perlin gradients in 3D. */
     switch (h % 12U)
     {
-        case 0U:  return mu_noise_v3( 1.0f,  1.0f,  0.0f);
-        case 1U:  return mu_noise_v3(-1.0f,  1.0f,  0.0f);
-        case 2U:  return mu_noise_v3( 1.0f, -1.0f,  0.0f);
-        case 3U:  return mu_noise_v3(-1.0f, -1.0f,  0.0f);
-        case 4U:  return mu_noise_v3( 1.0f,  0.0f,  1.0f);
-        case 5U:  return mu_noise_v3(-1.0f,  0.0f,  1.0f);
-        case 6U:  return mu_noise_v3( 1.0f,  0.0f, -1.0f);
-        case 7U:  return mu_noise_v3(-1.0f,  0.0f, -1.0f);
-        case 8U:  return mu_noise_v3( 0.0f,  1.0f,  1.0f);
-        case 9U:  return mu_noise_v3( 0.0f, -1.0f,  1.0f);
-        case 10U: return mu_noise_v3( 0.0f,  1.0f, -1.0f);
-        default:  return mu_noise_v3( 0.0f, -1.0f, -1.0f);
+        case 0U:  mu_noise_v3(out,  1.0f,  1.0f,  0.0f); break;
+        case 1U:  mu_noise_v3(out, -1.0f,  1.0f,  0.0f); break;
+        case 2U:  mu_noise_v3(out,  1.0f, -1.0f,  0.0f); break;
+        case 3U:  mu_noise_v3(out, -1.0f, -1.0f,  0.0f); break;
+        case 4U:  mu_noise_v3(out,  1.0f,  0.0f,  1.0f); break;
+        case 5U:  mu_noise_v3(out, -1.0f,  0.0f,  1.0f); break;
+        case 6U:  mu_noise_v3(out,  1.0f,  0.0f, -1.0f); break;
+        case 7U:  mu_noise_v3(out, -1.0f,  0.0f, -1.0f); break;
+        case 8U:  mu_noise_v3(out,  0.0f,  1.0f,  1.0f); break;
+        case 9U:  mu_noise_v3(out,  0.0f, -1.0f,  1.0f); break;
+        case 10U: mu_noise_v3(out,  0.0f,  1.0f, -1.0f); break;
+        default:  mu_noise_v3(out,  0.0f, -1.0f, -1.0f); break;
     }
 }
 
@@ -873,7 +877,7 @@ MU_INLINE mu_noise_vec3 mu_noise_grad3_from_hash(uint32_t h)
     This is equivalent to the classic 32-entry table but avoids a table in
     the header. Each vector has length sqrt(3).
 */
-MU_INLINE mu_noise_vec4 mu_noise_grad4_from_hash(uint32_t h)
+MU_INLINE void mu_noise_grad4_from_hash(mu_noise_vec4 out, uint32_t h)
 {
     unsigned zero_axis = h & 3U;
     float a = (h & 4U)  ? -1.0f : 1.0f;
@@ -882,10 +886,10 @@ MU_INLINE mu_noise_vec4 mu_noise_grad4_from_hash(uint32_t h)
 
     switch (zero_axis)
     {
-        case 0U: return mu_noise_v4(0.0f, a, b, c);
-        case 1U: return mu_noise_v4(a, 0.0f, b, c);
-        case 2U: return mu_noise_v4(a, b, 0.0f, c);
-        default: return mu_noise_v4(a, b, c, 0.0f);
+        case 0U:  mu_noise_v4(out, 0.0f, a, b, c); break;
+        case 1U:  mu_noise_v4(out, a, 0.0f, b, c); break;
+        case 2U:  mu_noise_v4(out, a, b, 0.0f, c); break;
+        default:  mu_noise_v4(out, a, b, c, 0.0f); break;
     }
 }
 
@@ -920,15 +924,19 @@ MU_INLINE float mu_noise_perlin2(float x, float y, uint32_t seed)
     float ux = mu_noise_smootherstep5(tx);
     float uy = mu_noise_smootherstep5(ty);
 
-    mu_noise_vec2 g00 = mu_noise_grad2_from_hash(mu_noise_hash_2i(ix0, iy0, seed));
-    mu_noise_vec2 g10 = mu_noise_grad2_from_hash(mu_noise_hash_2i(ix1, iy0, seed));
-    mu_noise_vec2 g01 = mu_noise_grad2_from_hash(mu_noise_hash_2i(ix0, iy1, seed));
-    mu_noise_vec2 g11 = mu_noise_grad2_from_hash(mu_noise_hash_2i(ix1, iy1, seed));
+    mu_noise_vec2 g00;
+    mu_noise_grad2_from_hash(g00, mu_noise_hash_2i(ix0, iy0, seed));
+    mu_noise_vec2 g10;
+    mu_noise_grad2_from_hash(g10, mu_noise_hash_2i(ix1, iy0, seed));
+    mu_noise_vec2 g01;
+    mu_noise_grad2_from_hash(g01, mu_noise_hash_2i(ix0, iy1, seed));
+    mu_noise_vec2 g11;
+    mu_noise_grad2_from_hash(g11, mu_noise_hash_2i(ix1, iy1, seed));
 
-    float n00 = mu_noise_v2_dot(g00, mu_noise_v2(tx,        ty));
-    float n10 = mu_noise_v2_dot(g10, mu_noise_v2(tx - 1.0f, ty));
-    float n01 = mu_noise_v2_dot(g01, mu_noise_v2(tx,        ty - 1.0f));
-    float n11 = mu_noise_v2_dot(g11, mu_noise_v2(tx - 1.0f, ty - 1.0f));
+    float n00 = mu_noise_v2_dot(g00, (mu_noise_vec2){tx, ty});
+    float n10 = mu_noise_v2_dot(g10, (mu_noise_vec2){tx - 1.0f, ty});
+    float n01 = mu_noise_v2_dot(g01, (mu_noise_vec2){tx, ty - 1.0f});
+    float n11 = mu_noise_v2_dot(g11, (mu_noise_vec2){tx - 1.0f, ty - 1.0f});
 
     float a = mu_noise_lerp(n00, n10, ux);
     float b = mu_noise_lerp(n01, n11, ux);
@@ -954,23 +962,31 @@ MU_INLINE float mu_noise_perlin3(float x, float y, float z, uint32_t seed)
     float uy = mu_noise_smootherstep5(ty);
     float uz = mu_noise_smootherstep5(tz);
 
-    mu_noise_vec3 g000 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix0, iy0, iz0, seed));
-    mu_noise_vec3 g100 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix1, iy0, iz0, seed));
-    mu_noise_vec3 g010 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix0, iy1, iz0, seed));
-    mu_noise_vec3 g110 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix1, iy1, iz0, seed));
-    mu_noise_vec3 g001 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix0, iy0, iz1, seed));
-    mu_noise_vec3 g101 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix1, iy0, iz1, seed));
-    mu_noise_vec3 g011 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix0, iy1, iz1, seed));
-    mu_noise_vec3 g111 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix1, iy1, iz1, seed));
+    mu_noise_vec3 g000;
+    mu_noise_grad3_from_hash(g000, mu_noise_hash_3i(ix0, iy0, iz0, seed));
+    mu_noise_vec3 g100;
+    mu_noise_grad3_from_hash(g100, mu_noise_hash_3i(ix1, iy0, iz0, seed));
+    mu_noise_vec3 g010;
+    mu_noise_grad3_from_hash(g010, mu_noise_hash_3i(ix0, iy1, iz0, seed));
+    mu_noise_vec3 g110;
+    mu_noise_grad3_from_hash(g110, mu_noise_hash_3i(ix1, iy1, iz0, seed));
+    mu_noise_vec3 g001;
+    mu_noise_grad3_from_hash(g001, mu_noise_hash_3i(ix0, iy0, iz1, seed));
+    mu_noise_vec3 g101;
+    mu_noise_grad3_from_hash(g101, mu_noise_hash_3i(ix1, iy0, iz1, seed));
+    mu_noise_vec3 g011;
+    mu_noise_grad3_from_hash(g011, mu_noise_hash_3i(ix0, iy1, iz1, seed));
+    mu_noise_vec3 g111;
+    mu_noise_grad3_from_hash(g111, mu_noise_hash_3i(ix1, iy1, iz1, seed));
 
-    float n000 = mu_noise_v3_dot(g000, mu_noise_v3(tx,        ty,        tz));
-    float n100 = mu_noise_v3_dot(g100, mu_noise_v3(tx - 1.0f, ty,        tz));
-    float n010 = mu_noise_v3_dot(g010, mu_noise_v3(tx,        ty - 1.0f, tz));
-    float n110 = mu_noise_v3_dot(g110, mu_noise_v3(tx - 1.0f, ty - 1.0f, tz));
-    float n001 = mu_noise_v3_dot(g001, mu_noise_v3(tx,        ty,        tz - 1.0f));
-    float n101 = mu_noise_v3_dot(g101, mu_noise_v3(tx - 1.0f, ty,        tz - 1.0f));
-    float n011 = mu_noise_v3_dot(g011, mu_noise_v3(tx,        ty - 1.0f, tz - 1.0f));
-    float n111 = mu_noise_v3_dot(g111, mu_noise_v3(tx - 1.0f, ty - 1.0f, tz - 1.0f));
+    float n000 = mu_noise_v3_dot(g000, (mu_noise_vec3){tx, ty, tz});
+    float n100 = mu_noise_v3_dot(g100, (mu_noise_vec3){tx - 1.0f, ty, tz});
+    float n010 = mu_noise_v3_dot(g010, (mu_noise_vec3){tx, ty - 1.0f, tz});
+    float n110 = mu_noise_v3_dot(g110, (mu_noise_vec3){tx - 1.0f, ty - 1.0f, tz});
+    float n001 = mu_noise_v3_dot(g001, (mu_noise_vec3){tx, ty, tz - 1.0f});
+    float n101 = mu_noise_v3_dot(g101, (mu_noise_vec3){tx - 1.0f, ty, tz - 1.0f});
+    float n011 = mu_noise_v3_dot(g011, (mu_noise_vec3){tx, ty - 1.0f, tz - 1.0f});
+    float n111 = mu_noise_v3_dot(g111, (mu_noise_vec3){tx - 1.0f, ty - 1.0f, tz - 1.0f});
 
     float x00 = mu_noise_lerp(n000, n100, ux);
     float x10 = mu_noise_lerp(n010, n110, ux);
@@ -1013,39 +1029,55 @@ MU_INLINE float mu_noise_perlin4(float x, float y, float z, float w, uint32_t se
     float uz = mu_noise_smootherstep5(tz);
     float uw = mu_noise_smootherstep5(tw);
 
-    mu_noise_vec4 g0000 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix0, iy0, iz0, iw0, seed));
-    mu_noise_vec4 g1000 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix1, iy0, iz0, iw0, seed));
-    mu_noise_vec4 g0100 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix0, iy1, iz0, iw0, seed));
-    mu_noise_vec4 g1100 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix1, iy1, iz0, iw0, seed));
-    mu_noise_vec4 g0010 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix0, iy0, iz1, iw0, seed));
-    mu_noise_vec4 g1010 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix1, iy0, iz1, iw0, seed));
-    mu_noise_vec4 g0110 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix0, iy1, iz1, iw0, seed));
-    mu_noise_vec4 g1110 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix1, iy1, iz1, iw0, seed));
-    mu_noise_vec4 g0001 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix0, iy0, iz0, iw1, seed));
-    mu_noise_vec4 g1001 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix1, iy0, iz0, iw1, seed));
-    mu_noise_vec4 g0101 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix0, iy1, iz0, iw1, seed));
-    mu_noise_vec4 g1101 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix1, iy1, iz0, iw1, seed));
-    mu_noise_vec4 g0011 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix0, iy0, iz1, iw1, seed));
-    mu_noise_vec4 g1011 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix1, iy0, iz1, iw1, seed));
-    mu_noise_vec4 g0111 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix0, iy1, iz1, iw1, seed));
-    mu_noise_vec4 g1111 = mu_noise_grad4_from_hash(mu_noise_hash_4i(ix1, iy1, iz1, iw1, seed));
+    mu_noise_vec4 g0000;
+    mu_noise_grad4_from_hash(g0000, mu_noise_hash_4i(ix0, iy0, iz0, iw0, seed));
+    mu_noise_vec4 g1000;
+    mu_noise_grad4_from_hash(g1000, mu_noise_hash_4i(ix1, iy0, iz0, iw0, seed));
+    mu_noise_vec4 g0100;
+    mu_noise_grad4_from_hash(g0100, mu_noise_hash_4i(ix0, iy1, iz0, iw0, seed));
+    mu_noise_vec4 g1100;
+    mu_noise_grad4_from_hash(g1100, mu_noise_hash_4i(ix1, iy1, iz0, iw0, seed));
+    mu_noise_vec4 g0010;
+    mu_noise_grad4_from_hash(g0010, mu_noise_hash_4i(ix0, iy0, iz1, iw0, seed));
+    mu_noise_vec4 g1010;
+    mu_noise_grad4_from_hash(g1010, mu_noise_hash_4i(ix1, iy0, iz1, iw0, seed));
+    mu_noise_vec4 g0110;
+    mu_noise_grad4_from_hash(g0110, mu_noise_hash_4i(ix0, iy1, iz1, iw0, seed));
+    mu_noise_vec4 g1110;
+    mu_noise_grad4_from_hash(g1110, mu_noise_hash_4i(ix1, iy1, iz1, iw0, seed));
+    mu_noise_vec4 g0001;
+    mu_noise_grad4_from_hash(g0001, mu_noise_hash_4i(ix0, iy0, iz0, iw1, seed));
+    mu_noise_vec4 g1001;
+    mu_noise_grad4_from_hash(g1001, mu_noise_hash_4i(ix1, iy0, iz0, iw1, seed));
+    mu_noise_vec4 g0101;
+    mu_noise_grad4_from_hash(g0101, mu_noise_hash_4i(ix0, iy1, iz0, iw1, seed));
+    mu_noise_vec4 g1101;
+    mu_noise_grad4_from_hash(g1101, mu_noise_hash_4i(ix1, iy1, iz0, iw1, seed));
+    mu_noise_vec4 g0011;
+    mu_noise_grad4_from_hash(g0011, mu_noise_hash_4i(ix0, iy0, iz1, iw1, seed));
+    mu_noise_vec4 g1011;
+    mu_noise_grad4_from_hash(g1011, mu_noise_hash_4i(ix1, iy0, iz1, iw1, seed));
+    mu_noise_vec4 g0111;
+    mu_noise_grad4_from_hash(g0111, mu_noise_hash_4i(ix0, iy1, iz1, iw1, seed));
+    mu_noise_vec4 g1111;
+    mu_noise_grad4_from_hash(g1111, mu_noise_hash_4i(ix1, iy1, iz1, iw1, seed));
 
-    float n0000 = mu_noise_v4_dot(g0000, mu_noise_v4(tx,        ty,        tz,        tw));
-    float n1000 = mu_noise_v4_dot(g1000, mu_noise_v4(tx - 1.0f, ty,        tz,        tw));
-    float n0100 = mu_noise_v4_dot(g0100, mu_noise_v4(tx,        ty - 1.0f, tz,        tw));
-    float n1100 = mu_noise_v4_dot(g1100, mu_noise_v4(tx - 1.0f, ty - 1.0f, tz,        tw));
-    float n0010 = mu_noise_v4_dot(g0010, mu_noise_v4(tx,        ty,        tz - 1.0f, tw));
-    float n1010 = mu_noise_v4_dot(g1010, mu_noise_v4(tx - 1.0f, ty,        tz - 1.0f, tw));
-    float n0110 = mu_noise_v4_dot(g0110, mu_noise_v4(tx,        ty - 1.0f, tz - 1.0f, tw));
-    float n1110 = mu_noise_v4_dot(g1110, mu_noise_v4(tx - 1.0f, ty - 1.0f, tz - 1.0f, tw));
-    float n0001 = mu_noise_v4_dot(g0001, mu_noise_v4(tx,        ty,        tz,        tw - 1.0f));
-    float n1001 = mu_noise_v4_dot(g1001, mu_noise_v4(tx - 1.0f, ty,        tz,        tw - 1.0f));
-    float n0101 = mu_noise_v4_dot(g0101, mu_noise_v4(tx,        ty - 1.0f, tz,        tw - 1.0f));
-    float n1101 = mu_noise_v4_dot(g1101, mu_noise_v4(tx - 1.0f, ty - 1.0f, tz,        tw - 1.0f));
-    float n0011 = mu_noise_v4_dot(g0011, mu_noise_v4(tx,        ty,        tz - 1.0f, tw - 1.0f));
-    float n1011 = mu_noise_v4_dot(g1011, mu_noise_v4(tx - 1.0f, ty,        tz - 1.0f, tw - 1.0f));
-    float n0111 = mu_noise_v4_dot(g0111, mu_noise_v4(tx,        ty - 1.0f, tz - 1.0f, tw - 1.0f));
-    float n1111 = mu_noise_v4_dot(g1111, mu_noise_v4(tx - 1.0f, ty - 1.0f, tz - 1.0f, tw - 1.0f));
+    float n0000 = mu_noise_v4_dot(g0000, (mu_noise_vec4){tx, ty, tz, tw});
+    float n1000 = mu_noise_v4_dot(g1000, (mu_noise_vec4){tx - 1.0f, ty, tz, tw});
+    float n0100 = mu_noise_v4_dot(g0100, (mu_noise_vec4){tx, ty - 1.0f, tz, tw});
+    float n1100 = mu_noise_v4_dot(g1100, (mu_noise_vec4){tx - 1.0f, ty - 1.0f, tz, tw});
+    float n0010 = mu_noise_v4_dot(g0010, (mu_noise_vec4){tx, ty, tz - 1.0f, tw});
+    float n1010 = mu_noise_v4_dot(g1010, (mu_noise_vec4){tx - 1.0f, ty, tz - 1.0f, tw});
+    float n0110 = mu_noise_v4_dot(g0110, (mu_noise_vec4){tx, ty - 1.0f, tz - 1.0f, tw});
+    float n1110 = mu_noise_v4_dot(g1110, (mu_noise_vec4){tx - 1.0f, ty - 1.0f, tz - 1.0f, tw});
+    float n0001 = mu_noise_v4_dot(g0001, (mu_noise_vec4){tx, ty, tz, tw - 1.0f});
+    float n1001 = mu_noise_v4_dot(g1001, (mu_noise_vec4){tx - 1.0f, ty, tz, tw - 1.0f});
+    float n0101 = mu_noise_v4_dot(g0101, (mu_noise_vec4){tx, ty - 1.0f, tz, tw - 1.0f});
+    float n1101 = mu_noise_v4_dot(g1101, (mu_noise_vec4){tx - 1.0f, ty - 1.0f, tz, tw - 1.0f});
+    float n0011 = mu_noise_v4_dot(g0011, (mu_noise_vec4){tx, ty, tz - 1.0f, tw - 1.0f});
+    float n1011 = mu_noise_v4_dot(g1011, (mu_noise_vec4){tx - 1.0f, ty, tz - 1.0f, tw - 1.0f});
+    float n0111 = mu_noise_v4_dot(g0111, (mu_noise_vec4){tx, ty - 1.0f, tz - 1.0f, tw - 1.0f});
+    float n1111 = mu_noise_v4_dot(g1111, (mu_noise_vec4){tx - 1.0f, ty - 1.0f, tz - 1.0f, tw - 1.0f});
 
     float x000 = mu_noise_lerp(n0000, n1000, ux);
     float x100 = mu_noise_lerp(n0100, n1100, ux);
@@ -1103,39 +1135,39 @@ MU_INLINE float mu_noise_perlin4_periodic(float x, float y, float z, float w,
     uz = mu_noise_smootherstep5(tz);
     uw = mu_noise_smootherstep5(tw);
 
-    g0000 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix0, iy0, iz0, iw0, period_x, period_y, period_z, period_w, seed));
-    g1000 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix1, iy0, iz0, iw0, period_x, period_y, period_z, period_w, seed));
-    g0100 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix0, iy1, iz0, iw0, period_x, period_y, period_z, period_w, seed));
-    g1100 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix1, iy1, iz0, iw0, period_x, period_y, period_z, period_w, seed));
-    g0010 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix0, iy0, iz1, iw0, period_x, period_y, period_z, period_w, seed));
-    g1010 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix1, iy0, iz1, iw0, period_x, period_y, period_z, period_w, seed));
-    g0110 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix0, iy1, iz1, iw0, period_x, period_y, period_z, period_w, seed));
-    g1110 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix1, iy1, iz1, iw0, period_x, period_y, period_z, period_w, seed));
-    g0001 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix0, iy0, iz0, iw1, period_x, period_y, period_z, period_w, seed));
-    g1001 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix1, iy0, iz0, iw1, period_x, period_y, period_z, period_w, seed));
-    g0101 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix0, iy1, iz0, iw1, period_x, period_y, period_z, period_w, seed));
-    g1101 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix1, iy1, iz0, iw1, period_x, period_y, period_z, period_w, seed));
-    g0011 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix0, iy0, iz1, iw1, period_x, period_y, period_z, period_w, seed));
-    g1011 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix1, iy0, iz1, iw1, period_x, period_y, period_z, period_w, seed));
-    g0111 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix0, iy1, iz1, iw1, period_x, period_y, period_z, period_w, seed));
-    g1111 = mu_noise_grad4_from_hash(mu_noise_hash_4i_periodic(ix1, iy1, iz1, iw1, period_x, period_y, period_z, period_w, seed));
+    mu_noise_grad4_from_hash(g0000, mu_noise_hash_4i_periodic(ix0, iy0, iz0, iw0, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g1000, mu_noise_hash_4i_periodic(ix1, iy0, iz0, iw0, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g0100, mu_noise_hash_4i_periodic(ix0, iy1, iz0, iw0, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g1100, mu_noise_hash_4i_periodic(ix1, iy1, iz0, iw0, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g0010, mu_noise_hash_4i_periodic(ix0, iy0, iz1, iw0, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g1010, mu_noise_hash_4i_periodic(ix1, iy0, iz1, iw0, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g0110, mu_noise_hash_4i_periodic(ix0, iy1, iz1, iw0, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g1110, mu_noise_hash_4i_periodic(ix1, iy1, iz1, iw0, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g0001, mu_noise_hash_4i_periodic(ix0, iy0, iz0, iw1, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g1001, mu_noise_hash_4i_periodic(ix1, iy0, iz0, iw1, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g0101, mu_noise_hash_4i_periodic(ix0, iy1, iz0, iw1, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g1101, mu_noise_hash_4i_periodic(ix1, iy1, iz0, iw1, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g0011, mu_noise_hash_4i_periodic(ix0, iy0, iz1, iw1, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g1011, mu_noise_hash_4i_periodic(ix1, iy0, iz1, iw1, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g0111, mu_noise_hash_4i_periodic(ix0, iy1, iz1, iw1, period_x, period_y, period_z, period_w, seed));;
+    mu_noise_grad4_from_hash(g1111, mu_noise_hash_4i_periodic(ix1, iy1, iz1, iw1, period_x, period_y, period_z, period_w, seed));;
 
-    n0000 = mu_noise_v4_dot(g0000, mu_noise_v4(tx,        ty,        tz,        tw));
-    n1000 = mu_noise_v4_dot(g1000, mu_noise_v4(tx - 1.0f, ty,        tz,        tw));
-    n0100 = mu_noise_v4_dot(g0100, mu_noise_v4(tx,        ty - 1.0f, tz,        tw));
-    n1100 = mu_noise_v4_dot(g1100, mu_noise_v4(tx - 1.0f, ty - 1.0f, tz,        tw));
-    n0010 = mu_noise_v4_dot(g0010, mu_noise_v4(tx,        ty,        tz - 1.0f, tw));
-    n1010 = mu_noise_v4_dot(g1010, mu_noise_v4(tx - 1.0f, ty,        tz - 1.0f, tw));
-    n0110 = mu_noise_v4_dot(g0110, mu_noise_v4(tx,        ty - 1.0f, tz - 1.0f, tw));
-    n1110 = mu_noise_v4_dot(g1110, mu_noise_v4(tx - 1.0f, ty - 1.0f, tz - 1.0f, tw));
-    n0001 = mu_noise_v4_dot(g0001, mu_noise_v4(tx,        ty,        tz,        tw - 1.0f));
-    n1001 = mu_noise_v4_dot(g1001, mu_noise_v4(tx - 1.0f, ty,        tz,        tw - 1.0f));
-    n0101 = mu_noise_v4_dot(g0101, mu_noise_v4(tx,        ty - 1.0f, tz,        tw - 1.0f));
-    n1101 = mu_noise_v4_dot(g1101, mu_noise_v4(tx - 1.0f, ty - 1.0f, tz,        tw - 1.0f));
-    n0011 = mu_noise_v4_dot(g0011, mu_noise_v4(tx,        ty,        tz - 1.0f, tw - 1.0f));
-    n1011 = mu_noise_v4_dot(g1011, mu_noise_v4(tx - 1.0f, ty,        tz - 1.0f, tw - 1.0f));
-    n0111 = mu_noise_v4_dot(g0111, mu_noise_v4(tx,        ty - 1.0f, tz - 1.0f, tw - 1.0f));
-    n1111 = mu_noise_v4_dot(g1111, mu_noise_v4(tx - 1.0f, ty - 1.0f, tz - 1.0f, tw - 1.0f));
+    n0000 = mu_noise_v4_dot(g0000, (mu_noise_vec4){tx, ty, tz, tw});
+    n1000 = mu_noise_v4_dot(g1000, (mu_noise_vec4){tx - 1.0f, ty, tz, tw});
+    n0100 = mu_noise_v4_dot(g0100, (mu_noise_vec4){tx, ty - 1.0f, tz, tw});
+    n1100 = mu_noise_v4_dot(g1100, (mu_noise_vec4){tx - 1.0f, ty - 1.0f, tz, tw});
+    n0010 = mu_noise_v4_dot(g0010, (mu_noise_vec4){tx, ty, tz - 1.0f, tw});
+    n1010 = mu_noise_v4_dot(g1010, (mu_noise_vec4){tx - 1.0f, ty, tz - 1.0f, tw});
+    n0110 = mu_noise_v4_dot(g0110, (mu_noise_vec4){tx, ty - 1.0f, tz - 1.0f, tw});
+    n1110 = mu_noise_v4_dot(g1110, (mu_noise_vec4){tx - 1.0f, ty - 1.0f, tz - 1.0f, tw});
+    n0001 = mu_noise_v4_dot(g0001, (mu_noise_vec4){tx, ty, tz, tw - 1.0f});
+    n1001 = mu_noise_v4_dot(g1001, (mu_noise_vec4){tx - 1.0f, ty, tz, tw - 1.0f});
+    n0101 = mu_noise_v4_dot(g0101, (mu_noise_vec4){tx, ty - 1.0f, tz, tw - 1.0f});
+    n1101 = mu_noise_v4_dot(g1101, (mu_noise_vec4){tx - 1.0f, ty - 1.0f, tz, tw - 1.0f});
+    n0011 = mu_noise_v4_dot(g0011, (mu_noise_vec4){tx, ty, tz - 1.0f, tw - 1.0f});
+    n1011 = mu_noise_v4_dot(g1011, (mu_noise_vec4){tx - 1.0f, ty, tz - 1.0f, tw - 1.0f});
+    n0111 = mu_noise_v4_dot(g0111, (mu_noise_vec4){tx, ty - 1.0f, tz - 1.0f, tw - 1.0f});
+    n1111 = mu_noise_v4_dot(g1111, (mu_noise_vec4){tx - 1.0f, ty - 1.0f, tz - 1.0f, tw - 1.0f});
 
     x000 = mu_noise_lerp(n0000, n1000, ux);
     x100 = mu_noise_lerp(n0100, n1100, ux);
@@ -1190,15 +1222,19 @@ MU_INLINE float mu_noise_perlin2_periodic(float x, float y, int period_x, int pe
         float ux = mu_noise_smootherstep5(tx);
         float uy = mu_noise_smootherstep5(ty);
 
-        mu_noise_vec2 g00 = mu_noise_grad2_from_hash(mu_noise_hash_2i_periodic(ix0, iy0, period_x, period_y, seed));
-        mu_noise_vec2 g10 = mu_noise_grad2_from_hash(mu_noise_hash_2i_periodic(ix1, iy0, period_x, period_y, seed));
-        mu_noise_vec2 g01 = mu_noise_grad2_from_hash(mu_noise_hash_2i_periodic(ix0, iy1, period_x, period_y, seed));
-        mu_noise_vec2 g11 = mu_noise_grad2_from_hash(mu_noise_hash_2i_periodic(ix1, iy1, period_x, period_y, seed));
+        mu_noise_vec2 g00;
+        mu_noise_grad2_from_hash(g00, mu_noise_hash_2i_periodic(ix0, iy0, period_x, period_y, seed));
+        mu_noise_vec2 g10;
+        mu_noise_grad2_from_hash(g10, mu_noise_hash_2i_periodic(ix1, iy0, period_x, period_y, seed));
+        mu_noise_vec2 g01;
+        mu_noise_grad2_from_hash(g01, mu_noise_hash_2i_periodic(ix0, iy1, period_x, period_y, seed));
+        mu_noise_vec2 g11;
+        mu_noise_grad2_from_hash(g11, mu_noise_hash_2i_periodic(ix1, iy1, period_x, period_y, seed));
 
-        float n00 = mu_noise_v2_dot(g00, mu_noise_v2(tx,        ty));
-        float n10 = mu_noise_v2_dot(g10, mu_noise_v2(tx - 1.0f, ty));
-        float n01 = mu_noise_v2_dot(g01, mu_noise_v2(tx,        ty - 1.0f));
-        float n11 = mu_noise_v2_dot(g11, mu_noise_v2(tx - 1.0f, ty - 1.0f));
+        float n00 = mu_noise_v2_dot(g00, (mu_noise_vec2){tx, ty});
+        float n10 = mu_noise_v2_dot(g10, (mu_noise_vec2){tx - 1.0f, ty});
+        float n01 = mu_noise_v2_dot(g01, (mu_noise_vec2){tx, ty - 1.0f});
+        float n11 = mu_noise_v2_dot(g11, (mu_noise_vec2){tx - 1.0f, ty - 1.0f});
 
         {
             float a = mu_noise_lerp(n00, n10, ux);
@@ -1228,23 +1264,31 @@ MU_INLINE float mu_noise_perlin3_periodic(float x, float y, float z, int period_
         float uy = mu_noise_smootherstep5(ty);
         float uz = mu_noise_smootherstep5(tz);
 
-        mu_noise_vec3 g000 = mu_noise_grad3_from_hash(mu_noise_hash_3i_periodic(ix0, iy0, iz0, period_x, period_y, period_z, seed));
-        mu_noise_vec3 g100 = mu_noise_grad3_from_hash(mu_noise_hash_3i_periodic(ix1, iy0, iz0, period_x, period_y, period_z, seed));
-        mu_noise_vec3 g010 = mu_noise_grad3_from_hash(mu_noise_hash_3i_periodic(ix0, iy1, iz0, period_x, period_y, period_z, seed));
-        mu_noise_vec3 g110 = mu_noise_grad3_from_hash(mu_noise_hash_3i_periodic(ix1, iy1, iz0, period_x, period_y, period_z, seed));
-        mu_noise_vec3 g001 = mu_noise_grad3_from_hash(mu_noise_hash_3i_periodic(ix0, iy0, iz1, period_x, period_y, period_z, seed));
-        mu_noise_vec3 g101 = mu_noise_grad3_from_hash(mu_noise_hash_3i_periodic(ix1, iy0, iz1, period_x, period_y, period_z, seed));
-        mu_noise_vec3 g011 = mu_noise_grad3_from_hash(mu_noise_hash_3i_periodic(ix0, iy1, iz1, period_x, period_y, period_z, seed));
-        mu_noise_vec3 g111 = mu_noise_grad3_from_hash(mu_noise_hash_3i_periodic(ix1, iy1, iz1, period_x, period_y, period_z, seed));
+        mu_noise_vec3 g000;
+        mu_noise_grad3_from_hash(g000, mu_noise_hash_3i_periodic(ix0, iy0, iz0, period_x, period_y, period_z, seed));
+        mu_noise_vec3 g100;
+        mu_noise_grad3_from_hash(g100, mu_noise_hash_3i_periodic(ix1, iy0, iz0, period_x, period_y, period_z, seed));
+        mu_noise_vec3 g010;
+        mu_noise_grad3_from_hash(g010, mu_noise_hash_3i_periodic(ix0, iy1, iz0, period_x, period_y, period_z, seed));
+        mu_noise_vec3 g110;
+        mu_noise_grad3_from_hash(g110, mu_noise_hash_3i_periodic(ix1, iy1, iz0, period_x, period_y, period_z, seed));
+        mu_noise_vec3 g001;
+        mu_noise_grad3_from_hash(g001, mu_noise_hash_3i_periodic(ix0, iy0, iz1, period_x, period_y, period_z, seed));
+        mu_noise_vec3 g101;
+        mu_noise_grad3_from_hash(g101, mu_noise_hash_3i_periodic(ix1, iy0, iz1, period_x, period_y, period_z, seed));
+        mu_noise_vec3 g011;
+        mu_noise_grad3_from_hash(g011, mu_noise_hash_3i_periodic(ix0, iy1, iz1, period_x, period_y, period_z, seed));
+        mu_noise_vec3 g111;
+        mu_noise_grad3_from_hash(g111, mu_noise_hash_3i_periodic(ix1, iy1, iz1, period_x, period_y, period_z, seed));
 
-        float n000 = mu_noise_v3_dot(g000, mu_noise_v3(tx,        ty,        tz));
-        float n100 = mu_noise_v3_dot(g100, mu_noise_v3(tx - 1.0f, ty,        tz));
-        float n010 = mu_noise_v3_dot(g010, mu_noise_v3(tx,        ty - 1.0f, tz));
-        float n110 = mu_noise_v3_dot(g110, mu_noise_v3(tx - 1.0f, ty - 1.0f, tz));
-        float n001 = mu_noise_v3_dot(g001, mu_noise_v3(tx,        ty,        tz - 1.0f));
-        float n101 = mu_noise_v3_dot(g101, mu_noise_v3(tx - 1.0f, ty,        tz - 1.0f));
-        float n011 = mu_noise_v3_dot(g011, mu_noise_v3(tx,        ty - 1.0f, tz - 1.0f));
-        float n111 = mu_noise_v3_dot(g111, mu_noise_v3(tx - 1.0f, ty - 1.0f, tz - 1.0f));
+        float n000 = mu_noise_v3_dot(g000, (mu_noise_vec3){tx, ty, tz});
+        float n100 = mu_noise_v3_dot(g100, (mu_noise_vec3){tx - 1.0f, ty, tz});
+        float n010 = mu_noise_v3_dot(g010, (mu_noise_vec3){tx, ty - 1.0f, tz});
+        float n110 = mu_noise_v3_dot(g110, (mu_noise_vec3){tx - 1.0f, ty - 1.0f, tz});
+        float n001 = mu_noise_v3_dot(g001, (mu_noise_vec3){tx, ty, tz - 1.0f});
+        float n101 = mu_noise_v3_dot(g101, (mu_noise_vec3){tx - 1.0f, ty, tz - 1.0f});
+        float n011 = mu_noise_v3_dot(g011, (mu_noise_vec3){tx, ty - 1.0f, tz - 1.0f});
+        float n111 = mu_noise_v3_dot(g111, (mu_noise_vec3){tx - 1.0f, ty - 1.0f, tz - 1.0f});
 
         {
             float x00 = mu_noise_lerp(n000, n100, ux);
@@ -1308,25 +1352,28 @@ MU_INLINE float mu_noise_simplex2(float x, float y, uint32_t seed)
     float t0 = 0.5f - x0 * x0 - y0 * y0;
     if (t0 > 0.0f)
     {
-        mu_noise_vec2 g0 = mu_noise_grad2_from_hash(mu_noise_hash_2i(i, j, seed));
+        mu_noise_vec2 g0;
+        mu_noise_grad2_from_hash(g0, mu_noise_hash_2i(i, j, seed));
         t0 *= t0;
-        n0 = t0 * t0 * mu_noise_v2_dot(g0, mu_noise_v2(x0, y0));
+        n0 = t0 * t0 * mu_noise_v2_dot(g0, (mu_noise_vec2){x0, y0});
     }
 
     float t1 = 0.5f - x1 * x1 - y1 * y1;
     if (t1 > 0.0f)
     {
-        mu_noise_vec2 g1 = mu_noise_grad2_from_hash(mu_noise_hash_2i(i + i1, j + j1, seed));
+        mu_noise_vec2 g1;
+        mu_noise_grad2_from_hash(g1, mu_noise_hash_2i(i + i1, j + j1, seed));
         t1 *= t1;
-        n1 = t1 * t1 * mu_noise_v2_dot(g1, mu_noise_v2(x1, y1));
+        n1 = t1 * t1 * mu_noise_v2_dot(g1, (mu_noise_vec2){x1, y1});
     }
 
     float t2 = 0.5f - x2 * x2 - y2 * y2;
     if (t2 > 0.0f)
     {
-        mu_noise_vec2 g2 = mu_noise_grad2_from_hash(mu_noise_hash_2i(i + 1, j + 1, seed));
+        mu_noise_vec2 g2;
+        mu_noise_grad2_from_hash(g2, mu_noise_hash_2i(i + 1, j + 1, seed));
         t2 *= t2;
-        n2 = t2 * t2 * mu_noise_v2_dot(g2, mu_noise_v2(x2, y2));
+        n2 = t2 * t2 * mu_noise_v2_dot(g2, (mu_noise_vec2){x2, y2});
     }
 
     return 70.0f * (n0 + n1 + n2);
@@ -1411,33 +1458,37 @@ MU_INLINE float mu_noise_simplex3(float x, float y, float z, uint32_t seed)
     float t0 = 0.5f - x0 * x0 - y0 * y0 - z0 * z0;
     if (t0 > 0.0f)
     {
-        mu_noise_vec3 g0 = mu_noise_grad3_from_hash(mu_noise_hash_3i(i, j, k, seed));
+        mu_noise_vec3 g0;
+        mu_noise_grad3_from_hash(g0, mu_noise_hash_3i(i, j, k, seed));
         t0 *= t0;
-        n0 = t0 * t0 * mu_noise_v3_dot(g0, mu_noise_v3(x0, y0, z0));
+        n0 = t0 * t0 * mu_noise_v3_dot(g0, (mu_noise_vec3){x0, y0, z0});
     }
 
     float t1 = 0.5f - x1 * x1 - y1 * y1 - z1 * z1;
     if (t1 > 0.0f)
     {
-        mu_noise_vec3 g1 = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + i1, j + j1, k + k1, seed));
+        mu_noise_vec3 g1;
+        mu_noise_grad3_from_hash(g1, mu_noise_hash_3i(i + i1, j + j1, k + k1, seed));
         t1 *= t1;
-        n1 = t1 * t1 * mu_noise_v3_dot(g1, mu_noise_v3(x1, y1, z1));
+        n1 = t1 * t1 * mu_noise_v3_dot(g1, (mu_noise_vec3){x1, y1, z1});
     }
 
     float t2 = 0.5f - x2 * x2 - y2 * y2 - z2 * z2;
     if (t2 > 0.0f)
     {
-        mu_noise_vec3 g2 = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + i2, j + j2, k + k2, seed));
+        mu_noise_vec3 g2;
+        mu_noise_grad3_from_hash(g2, mu_noise_hash_3i(i + i2, j + j2, k + k2, seed));
         t2 *= t2;
-        n2 = t2 * t2 * mu_noise_v3_dot(g2, mu_noise_v3(x2, y2, z2));
+        n2 = t2 * t2 * mu_noise_v3_dot(g2, (mu_noise_vec3){x2, y2, z2});
     }
 
     float t3 = 0.5f - x3 * x3 - y3 * y3 - z3 * z3;
     if (t3 > 0.0f)
     {
-        mu_noise_vec3 g3 = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + 1, j + 1, k + 1, seed));
+        mu_noise_vec3 g3;
+        mu_noise_grad3_from_hash(g3, mu_noise_hash_3i(i + 1, j + 1, k + 1, seed));
         t3 *= t3;
-        n3 = t3 * t3 * mu_noise_v3_dot(g3, mu_noise_v3(x3, y3, z3));
+        n3 = t3 * t3 * mu_noise_v3_dot(g3, (mu_noise_vec3){x3, y3, z3});
     }
 
     return 72.0f * (n0 + n1 + n2 + n3);
@@ -1524,41 +1575,46 @@ MU_INLINE float mu_noise_simplex4(float x, float y, float z, float w, uint32_t s
     float t0 = 0.5f - x0 * x0 - y0 * y0 - z0 * z0 - w0 * w0;
     if (t0 > 0.0f)
     {
-        mu_noise_vec4 g0 = mu_noise_grad4_from_hash(mu_noise_hash_4i(i, j, k, l, seed));
+        mu_noise_vec4 g0;
+        mu_noise_grad4_from_hash(g0, mu_noise_hash_4i(i, j, k, l, seed));
         t0 *= t0;
-        n0 = t0 * t0 * mu_noise_v4_dot(g0, mu_noise_v4(x0, y0, z0, w0));
+        n0 = t0 * t0 * mu_noise_v4_dot(g0, (mu_noise_vec4){x0, y0, z0, w0});
     }
 
     float t1 = 0.5f - x1 * x1 - y1 * y1 - z1 * z1 - w1 * w1;
     if (t1 > 0.0f)
     {
-        mu_noise_vec4 g1 = mu_noise_grad4_from_hash(mu_noise_hash_4i(i + i1, j + j1, k + k1, l + l1, seed));
+        mu_noise_vec4 g1;
+        mu_noise_grad4_from_hash(g1, mu_noise_hash_4i(i + i1, j + j1, k + k1, l + l1, seed));
         t1 *= t1;
-        n1 = t1 * t1 * mu_noise_v4_dot(g1, mu_noise_v4(x1, y1, z1, w1));
+        n1 = t1 * t1 * mu_noise_v4_dot(g1, (mu_noise_vec4){x1, y1, z1, w1});
     }
 
     float t2 = 0.5f - x2 * x2 - y2 * y2 - z2 * z2 - w2 * w2;
     if (t2 > 0.0f)
     {
-        mu_noise_vec4 g2 = mu_noise_grad4_from_hash(mu_noise_hash_4i(i + i2, j + j2, k + k2, l + l2, seed));
+        mu_noise_vec4 g2;
+        mu_noise_grad4_from_hash(g2, mu_noise_hash_4i(i + i2, j + j2, k + k2, l + l2, seed));
         t2 *= t2;
-        n2 = t2 * t2 * mu_noise_v4_dot(g2, mu_noise_v4(x2, y2, z2, w2));
+        n2 = t2 * t2 * mu_noise_v4_dot(g2, (mu_noise_vec4){x2, y2, z2, w2});
     }
 
     float t3 = 0.5f - x3 * x3 - y3 * y3 - z3 * z3 - w3 * w3;
     if (t3 > 0.0f)
     {
-        mu_noise_vec4 g3 = mu_noise_grad4_from_hash(mu_noise_hash_4i(i + i3, j + j3, k + k3, l + l3, seed));
+        mu_noise_vec4 g3;
+        mu_noise_grad4_from_hash(g3, mu_noise_hash_4i(i + i3, j + j3, k + k3, l + l3, seed));
         t3 *= t3;
-        n3 = t3 * t3 * mu_noise_v4_dot(g3, mu_noise_v4(x3, y3, z3, w3));
+        n3 = t3 * t3 * mu_noise_v4_dot(g3, (mu_noise_vec4){x3, y3, z3, w3});
     }
 
     float t4 = 0.5f - x4 * x4 - y4 * y4 - z4 * z4 - w4 * w4;
     if (t4 > 0.0f)
     {
-        mu_noise_vec4 g4 = mu_noise_grad4_from_hash(mu_noise_hash_4i(i + 1, j + 1, k + 1, l + 1, seed));
+        mu_noise_vec4 g4;
+        mu_noise_grad4_from_hash(g4, mu_noise_hash_4i(i + 1, j + 1, k + 1, l + 1, seed));
         t4 *= t4;
-        n4 = t4 * t4 * mu_noise_v4_dot(g4, mu_noise_v4(x4, y4, z4, w4));
+        n4 = t4 * t4 * mu_noise_v4_dot(g4, (mu_noise_vec4){x4, y4, z4, w4});
     }
 
     return 62.0f * (n0 + n1 + n2 + n3 + n4);
@@ -1691,7 +1747,8 @@ MU_INLINE float mu_noise_simplex2_periodic_impl(float x, float y,
         float wy = mu_noise_wrap_period(cy, py);
         int hx = (int)floorf(wx + 0.5f * wy + 0.5f);
         int hy = (int)floorf(wy + 0.5f);
-        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(hx, hy, seed));
+        mu_noise_vec2 g;
+        mu_noise_grad2_from_hash(g, mu_noise_hash_2i(hx, hy, seed));
         float dx = x - cx;
         float dy = y - cy;
         float t = 0.8f - dx * dx - dy * dy;
@@ -1699,7 +1756,7 @@ MU_INLINE float mu_noise_simplex2_periodic_impl(float x, float y,
         if (t > 0.0f)
         {
             t *= t;
-            sum += t * t * mu_noise_v2_dot(g, mu_noise_v2(dx, dy));
+            sum += t * t * mu_noise_v2_dot(g, (mu_noise_vec2){dx, dy});
         }
     }
 
@@ -1765,7 +1822,8 @@ MU_INLINE float mu_noise_simplex3_periodic_impl(float x, float y, float z,
         int hx = (int)floorf(wy + wz + 0.5f);
         int hy = (int)floorf(wx + wz + 0.5f);
         int hz = (int)floorf(wx + wy + 0.5f);
-        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(hx, hy, hz, seed));
+        mu_noise_vec3 g;
+        mu_noise_grad3_from_hash(g, mu_noise_hash_3i(hx, hy, hz, seed));
         float dx = x - cx;
         float dy = y - cy;
         float dz = z - cz;
@@ -1774,7 +1832,7 @@ MU_INLINE float mu_noise_simplex3_periodic_impl(float x, float y, float z,
         if (t > 0.0f)
         {
             t *= t;
-            sum += t * t * mu_noise_v3_dot(g, mu_noise_v3(dx, dy, dz));
+            sum += t * t * mu_noise_v3_dot(g, (mu_noise_vec3){dx, dy, dz});
         }
     }
 
@@ -1851,10 +1909,8 @@ MU_INLINE float mu_noise_simplex4_periodic_impl(float x, float y, float z, float
         float cy = (si - 2.0f * sj + sk + sl) / 3.0f;
         float cz = (si + sj - 2.0f * sk + sl) / 3.0f;
         float cw = (si + sj + sk - 2.0f * sl) / 3.0f;
-        mu_noise_vec4 g = mu_noise_grad4_from_hash(
-            mu_noise_hash_4i_periodic(ii[n], jj[n], kk[n], ll[n],
-                                      period_x, period_y, period_z, period_w,
-                                      seed));
+        mu_noise_vec4 g;
+        mu_noise_grad4_from_hash(g,  mu_noise_hash_4i_periodic(ii[n], jj[n], kk[n], ll[n], period_x, period_y, period_z, period_w, seed));
         float dx = x - cx;
         float dy = y - cy;
         float dz = z - cz;
@@ -1864,7 +1920,7 @@ MU_INLINE float mu_noise_simplex4_periodic_impl(float x, float y, float z, float
         if (t > 0.0f)
         {
             t *= t;
-            sum += t * t * mu_noise_v4_dot(g, mu_noise_v4(dx, dy, dz, dw));
+            sum += t * t * mu_noise_v4_dot(g, (mu_noise_vec4){dx, dy, dz, dw});
         }
     }
 
@@ -1954,8 +2010,8 @@ MU_INLINE mu_noise_sample2 mu_noise_value2_deriv(float x, float y, uint32_t seed
 
     mu_noise_sample2 out;
     out.value = mu_noise_lerp(a, b, uy);
-    out.gradient.x = ((v10 - v00) * (1.0f - uy) + (v11 - v01) * uy) * fx;
-    out.gradient.y = (b - a) * fy;
+    out.gradient[0] = ((v10 - v00) * (1.0f - uy) + (v11 - v01) * uy) * fx;
+    out.gradient[1] = (b - a) * fy;
     return out;
 }
 
@@ -1999,9 +2055,9 @@ MU_INLINE mu_noise_sample3 mu_noise_value3_deriv(float x, float y, float z, uint
 
     mu_noise_sample3 out;
     out.value = mu_noise_lerp(b0, b1, uz);
-    out.gradient.x = (1.0f - uz) * db0x + uz * db1x;
-    out.gradient.y = (1.0f - uz) * ((a10 - a00) * fy) + uz * ((a11 - a01) * fy);
-    out.gradient.z = (b1 - b0) * fz;
+    out.gradient[0] = (1.0f - uz) * db0x + uz * db1x;
+    out.gradient[1] = (1.0f - uz) * ((a10 - a00) * fy) + uz * ((a11 - a01) * fy);
+    out.gradient[2] = (b1 - b0) * fz;
     return out;
 }
 
@@ -2019,15 +2075,19 @@ MU_INLINE mu_noise_sample2 mu_noise_perlin2_deriv(float x, float y, uint32_t see
     float fx = mu_noise_fade_derivative5(tx);
     float fy = mu_noise_fade_derivative5(ty);
 
-    mu_noise_vec2 g00 = mu_noise_grad2_from_hash(mu_noise_hash_2i(ix0, iy0, seed));
-    mu_noise_vec2 g10 = mu_noise_grad2_from_hash(mu_noise_hash_2i(ix1, iy0, seed));
-    mu_noise_vec2 g01 = mu_noise_grad2_from_hash(mu_noise_hash_2i(ix0, iy1, seed));
-    mu_noise_vec2 g11 = mu_noise_grad2_from_hash(mu_noise_hash_2i(ix1, iy1, seed));
+    mu_noise_vec2 g00;
+    mu_noise_grad2_from_hash(g00, mu_noise_hash_2i(ix0, iy0, seed));
+    mu_noise_vec2 g10;
+    mu_noise_grad2_from_hash(g10, mu_noise_hash_2i(ix1, iy0, seed));
+    mu_noise_vec2 g01;
+    mu_noise_grad2_from_hash(g01, mu_noise_hash_2i(ix0, iy1, seed));
+    mu_noise_vec2 g11;
+    mu_noise_grad2_from_hash(g11, mu_noise_hash_2i(ix1, iy1, seed));
 
-    float n00 = mu_noise_v2_dot(g00, mu_noise_v2(tx,        ty));
-    float n10 = mu_noise_v2_dot(g10, mu_noise_v2(tx - 1.0f, ty));
-    float n01 = mu_noise_v2_dot(g01, mu_noise_v2(tx,        ty - 1.0f));
-    float n11 = mu_noise_v2_dot(g11, mu_noise_v2(tx - 1.0f, ty - 1.0f));
+    float n00 = mu_noise_v2_dot(g00, (mu_noise_vec2){tx, ty});
+    float n10 = mu_noise_v2_dot(g10, (mu_noise_vec2){tx - 1.0f, ty});
+    float n01 = mu_noise_v2_dot(g01, (mu_noise_vec2){tx, ty - 1.0f});
+    float n11 = mu_noise_v2_dot(g11, (mu_noise_vec2){tx - 1.0f, ty - 1.0f});
 
     float a = mu_noise_lerp(n00, n10, ux);
     float b = mu_noise_lerp(n01, n11, ux);
@@ -2035,13 +2095,13 @@ MU_INLINE mu_noise_sample2 mu_noise_perlin2_deriv(float x, float y, uint32_t see
 
     mu_noise_sample2 out;
     out.value = scale * mu_noise_lerp(a, b, uy);
-    out.gradient.x = scale * (
-        (1.0f - uy) * ((1.0f - ux) * g00.x + ux * g10.x + fx * (n10 - n00)) +
-        uy * ((1.0f - ux) * g01.x + ux * g11.x + fx * (n11 - n01)));
-    out.gradient.y = scale * (
+    out.gradient[0] = scale * (
+        (1.0f - uy) * ((1.0f - ux) * g00[0] + ux * g10[0] + fx * (n10 - n00)) +
+        uy * ((1.0f - ux) * g01[0] + ux * g11[0] + fx * (n11 - n01)));
+    out.gradient[1] = scale * (
         (b - a) * fy +
-        (1.0f - uy) * ((1.0f - ux) * g00.y + ux * g10.y) +
-        uy * ((1.0f - ux) * g01.y + ux * g11.y));
+        (1.0f - uy) * ((1.0f - ux) * g00[1] + ux * g10[1]) +
+        uy * ((1.0f - ux) * g01[1] + ux * g11[1]));
     return out;
 }
 
@@ -2064,23 +2124,31 @@ MU_INLINE mu_noise_sample3 mu_noise_perlin3_deriv(float x, float y, float z, uin
     float fy = mu_noise_fade_derivative5(ty);
     float fz = mu_noise_fade_derivative5(tz);
 
-    mu_noise_vec3 g000 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix0, iy0, iz0, seed));
-    mu_noise_vec3 g100 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix1, iy0, iz0, seed));
-    mu_noise_vec3 g010 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix0, iy1, iz0, seed));
-    mu_noise_vec3 g110 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix1, iy1, iz0, seed));
-    mu_noise_vec3 g001 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix0, iy0, iz1, seed));
-    mu_noise_vec3 g101 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix1, iy0, iz1, seed));
-    mu_noise_vec3 g011 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix0, iy1, iz1, seed));
-    mu_noise_vec3 g111 = mu_noise_grad3_from_hash(mu_noise_hash_3i(ix1, iy1, iz1, seed));
+    mu_noise_vec3 g000;
+    mu_noise_grad3_from_hash(g000, mu_noise_hash_3i(ix0, iy0, iz0, seed));
+    mu_noise_vec3 g100;
+    mu_noise_grad3_from_hash(g100, mu_noise_hash_3i(ix1, iy0, iz0, seed));
+    mu_noise_vec3 g010;
+    mu_noise_grad3_from_hash(g010, mu_noise_hash_3i(ix0, iy1, iz0, seed));
+    mu_noise_vec3 g110;
+    mu_noise_grad3_from_hash(g110, mu_noise_hash_3i(ix1, iy1, iz0, seed));
+    mu_noise_vec3 g001;
+    mu_noise_grad3_from_hash(g001, mu_noise_hash_3i(ix0, iy0, iz1, seed));
+    mu_noise_vec3 g101;
+    mu_noise_grad3_from_hash(g101, mu_noise_hash_3i(ix1, iy0, iz1, seed));
+    mu_noise_vec3 g011;
+    mu_noise_grad3_from_hash(g011, mu_noise_hash_3i(ix0, iy1, iz1, seed));
+    mu_noise_vec3 g111;
+    mu_noise_grad3_from_hash(g111, mu_noise_hash_3i(ix1, iy1, iz1, seed));
 
-    float n000 = mu_noise_v3_dot(g000, mu_noise_v3(tx,        ty,        tz));
-    float n100 = mu_noise_v3_dot(g100, mu_noise_v3(tx - 1.0f, ty,        tz));
-    float n010 = mu_noise_v3_dot(g010, mu_noise_v3(tx,        ty - 1.0f, tz));
-    float n110 = mu_noise_v3_dot(g110, mu_noise_v3(tx - 1.0f, ty - 1.0f, tz));
-    float n001 = mu_noise_v3_dot(g001, mu_noise_v3(tx,        ty,        tz - 1.0f));
-    float n101 = mu_noise_v3_dot(g101, mu_noise_v3(tx - 1.0f, ty,        tz - 1.0f));
-    float n011 = mu_noise_v3_dot(g011, mu_noise_v3(tx,        ty - 1.0f, tz - 1.0f));
-    float n111 = mu_noise_v3_dot(g111, mu_noise_v3(tx - 1.0f, ty - 1.0f, tz - 1.0f));
+    float n000 = mu_noise_v3_dot(g000, (mu_noise_vec3){tx, ty, tz});
+    float n100 = mu_noise_v3_dot(g100, (mu_noise_vec3){tx - 1.0f, ty, tz});
+    float n010 = mu_noise_v3_dot(g010, (mu_noise_vec3){tx, ty - 1.0f, tz});
+    float n110 = mu_noise_v3_dot(g110, (mu_noise_vec3){tx - 1.0f, ty - 1.0f, tz});
+    float n001 = mu_noise_v3_dot(g001, (mu_noise_vec3){tx, ty, tz - 1.0f});
+    float n101 = mu_noise_v3_dot(g101, (mu_noise_vec3){tx - 1.0f, ty, tz - 1.0f});
+    float n011 = mu_noise_v3_dot(g011, (mu_noise_vec3){tx, ty - 1.0f, tz - 1.0f});
+    float n111 = mu_noise_v3_dot(g111, (mu_noise_vec3){tx - 1.0f, ty - 1.0f, tz - 1.0f});
 
     float a00 = mu_noise_lerp(n000, n100, ux);
     float a10 = mu_noise_lerp(n010, n110, ux);
@@ -2089,32 +2157,32 @@ MU_INLINE mu_noise_sample3 mu_noise_perlin3_deriv(float x, float y, float z, uin
     float b0 = mu_noise_lerp(a00, a10, uy);
     float b1 = mu_noise_lerp(a01, a11, uy);
 
-    float da00x = (1.0f - ux) * g000.x + ux * g100.x + fx * (n100 - n000);
-    float da10x = (1.0f - ux) * g010.x + ux * g110.x + fx * (n110 - n010);
-    float da01x = (1.0f - ux) * g001.x + ux * g101.x + fx * (n101 - n001);
-    float da11x = (1.0f - ux) * g011.x + ux * g111.x + fx * (n111 - n011);
+    float da00x = (1.0f - ux) * g000[0] + ux * g100[0] + fx * (n100 - n000);
+    float da10x = (1.0f - ux) * g010[0] + ux * g110[0] + fx * (n110 - n010);
+    float da01x = (1.0f - ux) * g001[0] + ux * g101[0] + fx * (n101 - n001);
+    float da11x = (1.0f - ux) * g011[0] + ux * g111[0] + fx * (n111 - n011);
 
-    float da00y = (1.0f - ux) * g000.y + ux * g100.y;
-    float da10y = (1.0f - ux) * g010.y + ux * g110.y;
-    float da01y = (1.0f - ux) * g001.y + ux * g101.y;
-    float da11y = (1.0f - ux) * g011.y + ux * g111.y;
+    float da00y = (1.0f - ux) * g000[1] + ux * g100[1];
+    float da10y = (1.0f - ux) * g010[1] + ux * g110[1];
+    float da01y = (1.0f - ux) * g001[1] + ux * g101[1];
+    float da11y = (1.0f - ux) * g011[1] + ux * g111[1];
 
-    float db0z = (1.0f - uy) * ((1.0f - ux) * g000.z + ux * g100.z) +
-                 uy * ((1.0f - ux) * g010.z + ux * g110.z);
-    float db1z = (1.0f - uy) * ((1.0f - ux) * g001.z + ux * g101.z) +
-                 uy * ((1.0f - ux) * g011.z + ux * g111.z);
+    float db0z = (1.0f - uy) * ((1.0f - ux) * g000[2] + ux * g100[2]) +
+                 uy * ((1.0f - ux) * g010[2] + ux * g110[2]);
+    float db1z = (1.0f - uy) * ((1.0f - ux) * g001[2] + ux * g101[2]) +
+                 uy * ((1.0f - ux) * g011[2] + ux * g111[2]);
 
     const float scale = 1.15470054f;
 
     mu_noise_sample3 out;
     out.value = scale * mu_noise_lerp(b0, b1, uz);
-    out.gradient.x = scale * (
+    out.gradient[0] = scale * (
         (1.0f - uz) * ((1.0f - uy) * da00x + uy * da10x) +
         uz * ((1.0f - uy) * da01x + uy * da11x));
-    out.gradient.y = scale * (
+    out.gradient[1] = scale * (
         (1.0f - uz) * ((1.0f - uy) * da00y + uy * da10y + fy * (a10 - a00)) +
         uz * ((1.0f - uy) * da01y + uy * da11y + fy * (a11 - a01)));
-    out.gradient.z = scale * ((b1 - b0) * fz + (1.0f - uz) * db0z + uz * db1z);
+    out.gradient[2] = scale * ((b1 - b0) * fz + (1.0f - uz) * db0z + uz * db1z);
     return out;
 }
 
@@ -2147,42 +2215,45 @@ MU_INLINE mu_noise_sample2 mu_noise_simplex2_deriv(float x, float y, uint32_t se
     float t0 = 0.5f - x0 * x0 - y0 * y0;
     if (t0 > 0.0f)
     {
-        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(i, j, seed));
-        float d = mu_noise_v2_dot(g, mu_noise_v2(x0, y0));
+        mu_noise_vec2 g;
+        mu_noise_grad2_from_hash(g, mu_noise_hash_2i(i, j, seed));
+        float d = mu_noise_v2_dot(g, (mu_noise_vec2){x0, y0});
         float t2 = t0 * t0;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t0 * x0 * d;
-        gy += t4 * g.y - 8.0f * t2 * t0 * y0 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t0 * x0 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t0 * y0 * d;
     }
 
     float t1 = 0.5f - x1 * x1 - y1 * y1;
     if (t1 > 0.0f)
     {
-        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(i + i1, j + j1, seed));
-        float d = mu_noise_v2_dot(g, mu_noise_v2(x1, y1));
+        mu_noise_vec2 g;
+        mu_noise_grad2_from_hash(g, mu_noise_hash_2i(i + i1, j + j1, seed));
+        float d = mu_noise_v2_dot(g, (mu_noise_vec2){x1, y1});
         float t2 = t1 * t1;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t1 * x1 * d;
-        gy += t4 * g.y - 8.0f * t2 * t1 * y1 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t1 * x1 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t1 * y1 * d;
     }
 
     float t2v = 0.5f - x2 * x2 - y2 * y2;
     if (t2v > 0.0f)
     {
-        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(i + 1, j + 1, seed));
-        float d = mu_noise_v2_dot(g, mu_noise_v2(x2, y2));
+        mu_noise_vec2 g;
+        mu_noise_grad2_from_hash(g, mu_noise_hash_2i(i + 1, j + 1, seed));
+        float d = mu_noise_v2_dot(g, (mu_noise_vec2){x2, y2});
         float t2 = t2v * t2v;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t2v * x2 * d;
-        gy += t4 * g.y - 8.0f * t2 * t2v * y2 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t2v * x2 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t2v * y2 * d;
     }
 
     mu_noise_sample2 out;
     out.value = 70.0f * value;
-    out.gradient = mu_noise_v2(70.0f * gx, 70.0f * gy);
+    memcpy(out.gradient, (mu_noise_vec2){70.0f * gx, 70.0f * gy}, sizeof(out.gradient));
     return out;
 }
 
@@ -2237,58 +2308,62 @@ MU_INLINE mu_noise_sample3 mu_noise_simplex3_deriv(float x, float y, float z, ui
     float t0 = 0.5f - x0 * x0 - y0 * y0 - z0 * z0;
     if (t0 > 0.0f)
     {
-        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i, j, k, seed));
-        float d = mu_noise_v3_dot(g, mu_noise_v3(x0, y0, z0));
+        mu_noise_vec3 g;
+        mu_noise_grad3_from_hash(g, mu_noise_hash_3i(i, j, k, seed));
+        float d = mu_noise_v3_dot(g, (mu_noise_vec3){x0, y0, z0});
         float t2 = t0 * t0;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t0 * x0 * d;
-        gy += t4 * g.y - 8.0f * t2 * t0 * y0 * d;
-        gz += t4 * g.z - 8.0f * t2 * t0 * z0 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t0 * x0 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t0 * y0 * d;
+        gz += t4 * g[2] - 8.0f * t2 * t0 * z0 * d;
     }
 
     float t1 = 0.5f - x1 * x1 - y1 * y1 - z1 * z1;
     if (t1 > 0.0f)
     {
-        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + i1, j + j1, k + k1, seed));
-        float d = mu_noise_v3_dot(g, mu_noise_v3(x1, y1, z1));
+        mu_noise_vec3 g;
+        mu_noise_grad3_from_hash(g, mu_noise_hash_3i(i + i1, j + j1, k + k1, seed));
+        float d = mu_noise_v3_dot(g, (mu_noise_vec3){x1, y1, z1});
         float t2 = t1 * t1;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t1 * x1 * d;
-        gy += t4 * g.y - 8.0f * t2 * t1 * y1 * d;
-        gz += t4 * g.z - 8.0f * t2 * t1 * z1 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t1 * x1 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t1 * y1 * d;
+        gz += t4 * g[2] - 8.0f * t2 * t1 * z1 * d;
     }
 
     float t2v = 0.5f - x2 * x2 - y2 * y2 - z2 * z2;
     if (t2v > 0.0f)
     {
-        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + i2, j + j2, k + k2, seed));
-        float d = mu_noise_v3_dot(g, mu_noise_v3(x2, y2, z2));
+        mu_noise_vec3 g;
+        mu_noise_grad3_from_hash(g, mu_noise_hash_3i(i + i2, j + j2, k + k2, seed));
+        float d = mu_noise_v3_dot(g, (mu_noise_vec3){x2, y2, z2});
         float t2 = t2v * t2v;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t2v * x2 * d;
-        gy += t4 * g.y - 8.0f * t2 * t2v * y2 * d;
-        gz += t4 * g.z - 8.0f * t2 * t2v * z2 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t2v * x2 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t2v * y2 * d;
+        gz += t4 * g[2] - 8.0f * t2 * t2v * z2 * d;
     }
 
     float t3v = 0.5f - x3 * x3 - y3 * y3 - z3 * z3;
     if (t3v > 0.0f)
     {
-        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + 1, j + 1, k + 1, seed));
-        float d = mu_noise_v3_dot(g, mu_noise_v3(x3, y3, z3));
+        mu_noise_vec3 g;
+        mu_noise_grad3_from_hash(g, mu_noise_hash_3i(i + 1, j + 1, k + 1, seed));
+        float d = mu_noise_v3_dot(g, (mu_noise_vec3){x3, y3, z3});
         float t2 = t3v * t3v;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t3v * x3 * d;
-        gy += t4 * g.y - 8.0f * t2 * t3v * y3 * d;
-        gz += t4 * g.z - 8.0f * t2 * t3v * z3 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t3v * x3 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t3v * y3 * d;
+        gz += t4 * g[2] - 8.0f * t2 * t3v * z3 * d;
     }
 
     mu_noise_sample3 out;
     out.value = 72.0f * value;
-    out.gradient = mu_noise_v3(72.0f * gx, 72.0f * gy, 72.0f * gz);
+    memcpy(out.gradient, (mu_noise_vec3){72.0f * gx, 72.0f * gy, 72.0f * gz}, sizeof(out.gradient));
     return out;
 }
 
@@ -2341,7 +2416,7 @@ MU_INLINE mu_noise_sample4 mu_noise_value4_deriv(float x, float y, float z, floa
 
     mu_noise_sample4 out;
     out.value = value;
-    out.gradient = mu_noise_v4(gx, gy, gz, gw);
+    memcpy(out.gradient, (mu_noise_vec4){gx, gy, gz, gw}, sizeof(out.gradient));
     return out;
 }
 
@@ -2382,21 +2457,20 @@ MU_INLINE mu_noise_sample4 mu_noise_perlin4_deriv(float x, float y, float z, flo
         float wz = bz ? uz : (1.0f - uz);
         float ww = bw ? uw : (1.0f - uw);
         float p = wx * wy * wz * ww;
-        mu_noise_vec4 g = mu_noise_grad4_from_hash(
-            mu_noise_hash_4i(ix0 + bx, iy0 + by, iz0 + bz, iw0 + bw, seed));
-        float n = mu_noise_v4_dot(g, mu_noise_v4(tx - (float)bx, ty - (float)by,
-                                                 tz - (float)bz, tw - (float)bw));
+        mu_noise_vec4 g;
+        mu_noise_grad4_from_hash(g,  mu_noise_hash_4i(ix0 + bx, iy0 + by, iz0 + bz, iw0 + bw, seed));
+        float n = mu_noise_v4_dot(g, (mu_noise_vec4){tx - (float)bx, ty - (float)by, tz - (float)bz, tw - (float)bw});
 
         value += n * p;
-        gx += n * (bx ? fx : -fx) * wy * wz * ww + p * g.x;
-        gy += n * wx * (by ? fy : -fy) * wz * ww + p * g.y;
-        gz += n * wx * wy * (bz ? fz : -fz) * ww + p * g.z;
-        gw += n * wx * wy * wz * (bw ? fw : -fw) + p * g.w;
+        gx += n * (bx ? fx : -fx) * wy * wz * ww + p * g[0];
+        gy += n * wx * (by ? fy : -fy) * wz * ww + p * g[1];
+        gz += n * wx * wy * (bz ? fz : -fz) * ww + p * g[2];
+        gw += n * wx * wy * wz * (bw ? fw : -fw) + p * g[3];
     }
 
     mu_noise_sample4 out;
     out.value = value;
-    out.gradient = mu_noise_v4(gx, gy, gz, gw);
+    memcpy(out.gradient, (mu_noise_vec4){gx, gy, gz, gw}, sizeof(out.gradient));
     return out;
 }
 
@@ -2462,76 +2536,81 @@ MU_INLINE mu_noise_sample4 mu_noise_simplex4_deriv(float x, float y, float z, fl
     float t0 = 0.5f - x0 * x0 - y0 * y0 - z0 * z0 - w0 * w0;
     if (t0 > 0.0f)
     {
-        mu_noise_vec4 g = mu_noise_grad4_from_hash(mu_noise_hash_4i(i, j, k, l, seed));
-        float d = mu_noise_v4_dot(g, mu_noise_v4(x0, y0, z0, w0));
+        mu_noise_vec4 g;
+        mu_noise_grad4_from_hash(g, mu_noise_hash_4i(i, j, k, l, seed));
+        float d = mu_noise_v4_dot(g, (mu_noise_vec4){x0, y0, z0, w0});
         float t2 = t0 * t0;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t0 * x0 * d;
-        gy += t4 * g.y - 8.0f * t2 * t0 * y0 * d;
-        gz += t4 * g.z - 8.0f * t2 * t0 * z0 * d;
-        gw += t4 * g.w - 8.0f * t2 * t0 * w0 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t0 * x0 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t0 * y0 * d;
+        gz += t4 * g[2] - 8.0f * t2 * t0 * z0 * d;
+        gw += t4 * g[3] - 8.0f * t2 * t0 * w0 * d;
     }
 
     float t1 = 0.5f - x1 * x1 - y1 * y1 - z1 * z1 - w1 * w1;
     if (t1 > 0.0f)
     {
-        mu_noise_vec4 g = mu_noise_grad4_from_hash(mu_noise_hash_4i(i + i1, j + j1, k + k1, l + l1, seed));
-        float d = mu_noise_v4_dot(g, mu_noise_v4(x1, y1, z1, w1));
+        mu_noise_vec4 g;
+        mu_noise_grad4_from_hash(g, mu_noise_hash_4i(i + i1, j + j1, k + k1, l + l1, seed));
+        float d = mu_noise_v4_dot(g, (mu_noise_vec4){x1, y1, z1, w1});
         float t2 = t1 * t1;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t1 * x1 * d;
-        gy += t4 * g.y - 8.0f * t2 * t1 * y1 * d;
-        gz += t4 * g.z - 8.0f * t2 * t1 * z1 * d;
-        gw += t4 * g.w - 8.0f * t2 * t1 * w1 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t1 * x1 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t1 * y1 * d;
+        gz += t4 * g[2] - 8.0f * t2 * t1 * z1 * d;
+        gw += t4 * g[3] - 8.0f * t2 * t1 * w1 * d;
     }
 
     float t2v = 0.5f - x2 * x2 - y2 * y2 - z2 * z2 - w2 * w2;
     if (t2v > 0.0f)
     {
-        mu_noise_vec4 g = mu_noise_grad4_from_hash(mu_noise_hash_4i(i + i2, j + j2, k + k2, l + l2, seed));
-        float d = mu_noise_v4_dot(g, mu_noise_v4(x2, y2, z2, w2));
+        mu_noise_vec4 g;
+        mu_noise_grad4_from_hash(g, mu_noise_hash_4i(i + i2, j + j2, k + k2, l + l2, seed));
+        float d = mu_noise_v4_dot(g, (mu_noise_vec4){x2, y2, z2, w2});
         float t2 = t2v * t2v;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t2v * x2 * d;
-        gy += t4 * g.y - 8.0f * t2 * t2v * y2 * d;
-        gz += t4 * g.z - 8.0f * t2 * t2v * z2 * d;
-        gw += t4 * g.w - 8.0f * t2 * t2v * w2 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t2v * x2 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t2v * y2 * d;
+        gz += t4 * g[2] - 8.0f * t2 * t2v * z2 * d;
+        gw += t4 * g[3] - 8.0f * t2 * t2v * w2 * d;
     }
 
     float t3v = 0.5f - x3 * x3 - y3 * y3 - z3 * z3 - w3 * w3;
     if (t3v > 0.0f)
     {
-        mu_noise_vec4 g = mu_noise_grad4_from_hash(mu_noise_hash_4i(i + i3, j + j3, k + k3, l + l3, seed));
-        float d = mu_noise_v4_dot(g, mu_noise_v4(x3, y3, z3, w3));
+        mu_noise_vec4 g;
+        mu_noise_grad4_from_hash(g, mu_noise_hash_4i(i + i3, j + j3, k + k3, l + l3, seed));
+        float d = mu_noise_v4_dot(g, (mu_noise_vec4){x3, y3, z3, w3});
         float t2 = t3v * t3v;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t3v * x3 * d;
-        gy += t4 * g.y - 8.0f * t2 * t3v * y3 * d;
-        gz += t4 * g.z - 8.0f * t2 * t3v * z3 * d;
-        gw += t4 * g.w - 8.0f * t2 * t3v * w3 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t3v * x3 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t3v * y3 * d;
+        gz += t4 * g[2] - 8.0f * t2 * t3v * z3 * d;
+        gw += t4 * g[3] - 8.0f * t2 * t3v * w3 * d;
     }
 
     float t4v = 0.5f - x4 * x4 - y4 * y4 - z4 * z4 - w4 * w4;
     if (t4v > 0.0f)
     {
-        mu_noise_vec4 g = mu_noise_grad4_from_hash(mu_noise_hash_4i(i + 1, j + 1, k + 1, l + 1, seed));
-        float d = mu_noise_v4_dot(g, mu_noise_v4(x4, y4, z4, w4));
+        mu_noise_vec4 g;
+        mu_noise_grad4_from_hash(g, mu_noise_hash_4i(i + 1, j + 1, k + 1, l + 1, seed));
+        float d = mu_noise_v4_dot(g, (mu_noise_vec4){x4, y4, z4, w4});
         float t2 = t4v * t4v;
         float t4 = t2 * t2;
         value += t4 * d;
-        gx += t4 * g.x - 8.0f * t2 * t4v * x4 * d;
-        gy += t4 * g.y - 8.0f * t2 * t4v * y4 * d;
-        gz += t4 * g.z - 8.0f * t2 * t4v * z4 * d;
-        gw += t4 * g.w - 8.0f * t2 * t4v * w4 * d;
+        gx += t4 * g[0] - 8.0f * t2 * t4v * x4 * d;
+        gy += t4 * g[1] - 8.0f * t2 * t4v * y4 * d;
+        gz += t4 * g[2] - 8.0f * t2 * t4v * z4 * d;
+        gw += t4 * g[3] - 8.0f * t2 * t4v * w4 * d;
     }
 
     mu_noise_sample4 out;
     out.value = 62.0f * value;
-    out.gradient = mu_noise_v4(62.0f * gx, 62.0f * gy, 62.0f * gz, 62.0f * gw);
+    memcpy(out.gradient, (mu_noise_vec4){62.0f * gx, 62.0f * gy, 62.0f * gz, 62.0f * gw}, sizeof(out.gradient));
     return out;
 }
 
@@ -2550,8 +2629,8 @@ MU_INLINE mu_noise_sample2 mu_noise_sample2_fd(mu_noise_fn2 base, float x, float
     mu_noise_sample2 out;
 
     out.value = base(x, y, seed);
-    out.gradient.x = (base(x + e, y, seed) - base(x - e, y, seed)) / (2.0f * e);
-    out.gradient.y = (base(x, y + e, seed) - base(x, y - e, seed)) / (2.0f * e);
+    out.gradient[0] = (base(x + e, y, seed) - base(x - e, y, seed)) / (2.0f * e);
+    out.gradient[1] = (base(x, y + e, seed) - base(x, y - e, seed)) / (2.0f * e);
     return out;
 }
 
@@ -2562,9 +2641,9 @@ MU_INLINE mu_noise_sample3 mu_noise_sample3_fd(mu_noise_fn3 base, float x, float
     mu_noise_sample3 out;
 
     out.value = base(x, y, z, seed);
-    out.gradient.x = (base(x + e, y, z, seed) - base(x - e, y, z, seed)) / (2.0f * e);
-    out.gradient.y = (base(x, y + e, z, seed) - base(x, y - e, z, seed)) / (2.0f * e);
-    out.gradient.z = (base(x, y, z + e, seed) - base(x, y, z - e, seed)) / (2.0f * e);
+    out.gradient[0] = (base(x + e, y, z, seed) - base(x - e, y, z, seed)) / (2.0f * e);
+    out.gradient[1] = (base(x, y + e, z, seed) - base(x, y - e, z, seed)) / (2.0f * e);
+    out.gradient[2] = (base(x, y, z + e, seed) - base(x, y, z - e, seed)) / (2.0f * e);
     return out;
 }
 
@@ -2595,10 +2674,10 @@ MU_INLINE mu_noise_sample4 mu_noise_sample4_fd(mu_noise_fn4 base, float x, float
     mu_noise_sample4 out;
 
     out.value = base(x, y, z, w, seed);
-    out.gradient.x = (base(x + e, y, z, w, seed) - base(x - e, y, z, w, seed)) / (2.0f * e);
-    out.gradient.y = (base(x, y + e, z, w, seed) - base(x, y - e, z, w, seed)) / (2.0f * e);
-    out.gradient.z = (base(x, y, z + e, w, seed) - base(x, y, z - e, w, seed)) / (2.0f * e);
-    out.gradient.w = (base(x, y, z, w + e, seed) - base(x, y, z, w - e, seed)) / (2.0f * e);
+    out.gradient[0] = (base(x + e, y, z, w, seed) - base(x - e, y, z, w, seed)) / (2.0f * e);
+    out.gradient[1] = (base(x, y + e, z, w, seed) - base(x, y - e, z, w, seed)) / (2.0f * e);
+    out.gradient[2] = (base(x, y, z + e, w, seed) - base(x, y, z - e, w, seed)) / (2.0f * e);
+    out.gradient[3] = (base(x, y, z, w + e, seed) - base(x, y, z, w - e, seed)) / (2.0f * e);
     return out;
 }
 
@@ -2635,12 +2714,12 @@ MU_INLINE float mu_noise_distance2(mu_noise_vec2 d, mu_noise_distance_metric met
 {
     if (metric == MU_NOISE_DIST_MANHATTAN)
     {
-        return mu_noise_abs(d.x) + mu_noise_abs(d.y);
+        return mu_noise_abs(d[0]) + mu_noise_abs(d[1]);
     }
     if (metric == MU_NOISE_DIST_CHEBYSHEV)
     {
-        float ax = mu_noise_abs(d.x);
-        float ay = mu_noise_abs(d.y);
+        float ax = mu_noise_abs(d[0]);
+        float ay = mu_noise_abs(d[1]);
         return (ax > ay) ? ax : ay;
     }
     return mu_noise_v2_len(d);
@@ -2650,13 +2729,13 @@ MU_INLINE float mu_noise_distance3(mu_noise_vec3 d, mu_noise_distance_metric met
 {
     if (metric == MU_NOISE_DIST_MANHATTAN)
     {
-        return mu_noise_abs(d.x) + mu_noise_abs(d.y) + mu_noise_abs(d.z);
+        return mu_noise_abs(d[0]) + mu_noise_abs(d[1]) + mu_noise_abs(d[2]);
     }
     if (metric == MU_NOISE_DIST_CHEBYSHEV)
     {
-        float ax = mu_noise_abs(d.x);
-        float ay = mu_noise_abs(d.y);
-        float az = mu_noise_abs(d.z);
+        float ax = mu_noise_abs(d[0]);
+        float ay = mu_noise_abs(d[1]);
+        float az = mu_noise_abs(d[2]);
         float m = (ax > ay) ? ax : ay;
         return (m > az) ? m : az;
     }
@@ -2667,14 +2746,14 @@ MU_INLINE float mu_noise_distance4(mu_noise_vec4 d, mu_noise_distance_metric met
 {
     if (metric == MU_NOISE_DIST_MANHATTAN)
     {
-        return mu_noise_abs(d.x) + mu_noise_abs(d.y) + mu_noise_abs(d.z) + mu_noise_abs(d.w);
+        return mu_noise_abs(d[0]) + mu_noise_abs(d[1]) + mu_noise_abs(d[2]) + mu_noise_abs(d[3]);
     }
     if (metric == MU_NOISE_DIST_CHEBYSHEV)
     {
-        float ax = mu_noise_abs(d.x);
-        float ay = mu_noise_abs(d.y);
-        float az = mu_noise_abs(d.z);
-        float aw = mu_noise_abs(d.w);
+        float ax = mu_noise_abs(d[0]);
+        float ay = mu_noise_abs(d[1]);
+        float az = mu_noise_abs(d[2]);
+        float aw = mu_noise_abs(d[3]);
         float m = (ax > ay) ? ax : ay;
         if (az > m) m = az;
         return (aw > m) ? aw : m;
@@ -2702,8 +2781,8 @@ MU_INLINE mu_noise_worley2_result mu_noise_worley2_impl(float x, float y,
     out.f2 = FLT_MAX;
     out.cell_id1 = 0;
     out.cell_id2 = 0;
-    out.center1 = mu_noise_v2(0.0f, 0.0f);
-    out.center2 = mu_noise_v2(0.0f, 0.0f);
+    memcpy(out.center1, (mu_noise_vec2){0.0f, 0.0f}, sizeof(out.center1));
+    memcpy(out.center2, (mu_noise_vec2){0.0f, 0.0f}, sizeof(out.center2));
 
     for (int oy = -1; oy <= 1; ++oy)
     {
@@ -2716,8 +2795,10 @@ MU_INLINE mu_noise_worley2_result mu_noise_worley2_impl(float x, float y,
                 : mu_noise_hash_2i(cx, cy, seed);
             float fx = mu_noise_hash_to_unit_float(h);
             float fy = mu_noise_hash_to_unit_float(mu_noise_hash_u32(h ^ 0x68bc21ebu));
-            mu_noise_vec2 center = mu_noise_v2((float)cx + fx, (float)cy + fy);
-            mu_noise_vec2 d = mu_noise_v2_sub(center, mu_noise_v2(x, y));
+            mu_noise_vec2 center;
+            mu_noise_v2(center, (float)cx + fx, (float)cy + fy);
+            mu_noise_vec2 d;
+            mu_noise_v2_sub(d, center, (mu_noise_vec2){x, y});
             float dist = mu_noise_distance2(d, metric);
             int cell_id = (int)mu_noise_hash_u32(h ^ 0x9e3779b9u);
 
@@ -2725,16 +2806,16 @@ MU_INLINE mu_noise_worley2_result mu_noise_worley2_impl(float x, float y,
             {
                 out.f2 = out.f1;
                 out.cell_id2 = out.cell_id1;
-                out.center2 = out.center1;
+                memcpy(out.center2, out.center1, sizeof(out.center2));
                 out.f1 = dist;
                 out.cell_id1 = cell_id;
-                out.center1 = center;
+                memcpy(out.center1, center, sizeof(out.center1));
             }
             else if (dist < out.f2)
             {
                 out.f2 = dist;
                 out.cell_id2 = cell_id;
-                out.center2 = center;
+                memcpy(out.center2, center, sizeof(out.center2));
             }
         }
     }
@@ -2758,8 +2839,8 @@ MU_INLINE mu_noise_worley3_result mu_noise_worley3_impl(float x, float y, float 
     out.f2 = FLT_MAX;
     out.cell_id1 = 0;
     out.cell_id2 = 0;
-    out.center1 = mu_noise_v3(0.0f, 0.0f, 0.0f);
-    out.center2 = mu_noise_v3(0.0f, 0.0f, 0.0f);
+    memcpy(out.center1, (mu_noise_vec3){0.0f, 0.0f, 0.0f}, sizeof(out.center1));
+    memcpy(out.center2, (mu_noise_vec3){0.0f, 0.0f, 0.0f}, sizeof(out.center2));
 
     for (int oz = -1; oz <= 1; ++oz)
     {
@@ -2776,8 +2857,10 @@ MU_INLINE mu_noise_worley3_result mu_noise_worley3_impl(float x, float y, float 
                 float fx = mu_noise_hash_to_unit_float(h);
                 float fy = mu_noise_hash_to_unit_float(mu_noise_hash_u32(h ^ 0x68bc21ebu));
                 float fz = mu_noise_hash_to_unit_float(mu_noise_hash_u32(h ^ 0x02e5be93u));
-                mu_noise_vec3 center = mu_noise_v3((float)cx + fx, (float)cy + fy, (float)cz + fz);
-                mu_noise_vec3 d = mu_noise_v3_sub(center, mu_noise_v3(x, y, z));
+                mu_noise_vec3 center;
+                mu_noise_v3(center, (float)cx + fx, (float)cy + fy, (float)cz + fz);
+                mu_noise_vec3 d;
+                mu_noise_v3_sub(d, center, (mu_noise_vec3){x, y, z});
                 float dist = mu_noise_distance3(d, metric);
                 int cell_id = (int)mu_noise_hash_u32(h ^ 0x85ebca6bu);
 
@@ -2785,16 +2868,16 @@ MU_INLINE mu_noise_worley3_result mu_noise_worley3_impl(float x, float y, float 
                 {
                     out.f2 = out.f1;
                     out.cell_id2 = out.cell_id1;
-                    out.center2 = out.center1;
+                    memcpy(out.center2, out.center1, sizeof(out.center2));
                     out.f1 = dist;
                     out.cell_id1 = cell_id;
-                    out.center1 = center;
+                    memcpy(out.center1, center, sizeof(out.center1));
                 }
                 else if (dist < out.f2)
                 {
                     out.f2 = dist;
                     out.cell_id2 = cell_id;
-                    out.center2 = center;
+                    memcpy(out.center2, center, sizeof(out.center2));
                 }
             }
         }
@@ -2820,8 +2903,8 @@ MU_INLINE mu_noise_worley4_result mu_noise_worley4_impl(float x, float y, float 
     out.f2 = FLT_MAX;
     out.cell_id1 = 0;
     out.cell_id2 = 0;
-    out.center1 = mu_noise_v4(0.0f, 0.0f, 0.0f, 0.0f);
-    out.center2 = mu_noise_v4(0.0f, 0.0f, 0.0f, 0.0f);
+    memcpy(out.center1, (mu_noise_vec4){0.0f, 0.0f, 0.0f, 0.0f}, sizeof(out.center1));
+    memcpy(out.center2, (mu_noise_vec4){0.0f, 0.0f, 0.0f, 0.0f}, sizeof(out.center2));
 
     for (int ow = -1; ow <= 1; ++ow)
     {
@@ -2844,9 +2927,10 @@ MU_INLINE mu_noise_worley4_result mu_noise_worley4_impl(float x, float y, float 
                     float fy = mu_noise_hash_to_unit_float(mu_noise_hash_u32(h ^ 0x68bc21ebu));
                     float fz = mu_noise_hash_to_unit_float(mu_noise_hash_u32(h ^ 0x02e5be93u));
                     float fw = mu_noise_hash_to_unit_float(mu_noise_hash_u32(h ^ 0x7f4a7c15u));
-                    mu_noise_vec4 center = mu_noise_v4((float)cx + fx, (float)cy + fy,
-                                                       (float)cz + fz, (float)cw + fw);
-                    mu_noise_vec4 d = mu_noise_v4_sub(center, mu_noise_v4(x, y, z, w));
+                    mu_noise_vec4 center = {(float)cx + fx, (float)cy + fy,
+                                            (float)cz + fz, (float)cw + fw};
+                    mu_noise_vec4 d;
+                    mu_noise_v4_sub(d, center, (mu_noise_vec4){x, y, z, w});
                     float dist = mu_noise_distance4(d, metric);
                     int cell_id = (int)mu_noise_hash_u32(h ^ 0x85ebca6bu);
 
@@ -2854,16 +2938,16 @@ MU_INLINE mu_noise_worley4_result mu_noise_worley4_impl(float x, float y, float 
                     {
                         out.f2 = out.f1;
                         out.cell_id2 = out.cell_id1;
-                        out.center2 = out.center1;
+                        memcpy(out.center2, out.center1, sizeof(out.center2));
                         out.f1 = dist;
                         out.cell_id1 = cell_id;
-                        out.center1 = center;
+                        memcpy(out.center1, center, sizeof(out.center1));
                     }
                     else if (dist < out.f2)
                     {
                         out.f2 = dist;
                         out.cell_id2 = cell_id;
-                        out.center2 = center;
+                        memcpy(out.center2, center, sizeof(out.center2));
                     }
                 }
             }
@@ -2948,9 +3032,11 @@ MU_INLINE int mu_noise_worley2_cell_id(float x, float y, uint32_t seed)
     return mu_noise_worley2(x, y, seed, MU_NOISE_DIST_EUCLIDEAN).cell_id1;
 }
 
-MU_INLINE mu_noise_vec2 mu_noise_worley2_cell_center(float x, float y, uint32_t seed)
+MU_INLINE void mu_noise_worley2_cell_center(mu_noise_vec2 out, float x, float y,
+                                          uint32_t seed)
 {
-    return mu_noise_worley2(x, y, seed, MU_NOISE_DIST_EUCLIDEAN).center1;
+    memcpy(out, mu_noise_worley2(x, y, seed, MU_NOISE_DIST_EUCLIDEAN).center1,
+           sizeof(mu_noise_vec2));
 }
 
 MU_INLINE float mu_noise_worley3_f1(float x, float y, float z, uint32_t seed,
@@ -2977,10 +3063,11 @@ MU_INLINE int mu_noise_worley3_cell_id(float x, float y, float z, uint32_t seed)
     return mu_noise_worley3(x, y, z, seed, MU_NOISE_DIST_EUCLIDEAN).cell_id1;
 }
 
-MU_INLINE mu_noise_vec3 mu_noise_worley3_cell_center(float x, float y, float z,
-                                                     uint32_t seed)
+MU_INLINE void mu_noise_worley3_cell_center(mu_noise_vec3 out, float x, float y,
+                                          float z, uint32_t seed)
 {
-    return mu_noise_worley3(x, y, z, seed, MU_NOISE_DIST_EUCLIDEAN).center1;
+    memcpy(out, mu_noise_worley3(x, y, z, seed, MU_NOISE_DIST_EUCLIDEAN).center1,
+           sizeof(mu_noise_vec3));
 }
 
 MU_INLINE float mu_noise_worley4_f1(float x, float y, float z, float w,
@@ -3007,10 +3094,11 @@ MU_INLINE int mu_noise_worley4_cell_id(float x, float y, float z, float w, uint3
     return mu_noise_worley4(x, y, z, w, seed, MU_NOISE_DIST_EUCLIDEAN).cell_id1;
 }
 
-MU_INLINE mu_noise_vec4 mu_noise_worley4_cell_center(float x, float y, float z, float w,
-                                                     uint32_t seed)
+MU_INLINE void mu_noise_worley4_cell_center(mu_noise_vec4 out, float x, float y,
+                                          float z, float w, uint32_t seed)
 {
-    return mu_noise_worley4(x, y, z, w, seed, MU_NOISE_DIST_EUCLIDEAN).center1;
+    memcpy(out, mu_noise_worley4(x, y, z, w, seed, MU_NOISE_DIST_EUCLIDEAN).center1,
+           sizeof(mu_noise_vec4));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3419,59 +3507,65 @@ MU_INLINE float mu_noise_hetero_terrain3(mu_noise_fn3 base, float x, float y, fl
 
     where W is often simplex/perlin and N can be any base noise.
 */
-MU_INLINE mu_noise_vec2 mu_noise_domain_warp2(mu_noise_fn2 warp, float x, float y, uint32_t seed, float warp_amp, float warp_freq)
+MU_INLINE void mu_noise_domain_warp2(mu_noise_vec2 out, mu_noise_fn2 warp,
+                                    float x, float y, uint32_t seed,
+                                    float warp_amp, float warp_freq)
 {
     float qx = warp(x * warp_freq, y * warp_freq, seed ^ 0xA511E9B3u);
     float qy = warp((x + 19.19f) * warp_freq, (y - 33.47f) * warp_freq, seed ^ 0x63D83595u);
-    return mu_noise_v2(x + warp_amp * qx, y + warp_amp * qy);
+    mu_noise_v2(out, x + warp_amp * qx, y + warp_amp * qy);
 }
 
-MU_INLINE mu_noise_vec3 mu_noise_domain_warp3(mu_noise_fn3 warp, float x, float y, float z, uint32_t seed, float warp_amp, float warp_freq)
+MU_INLINE void mu_noise_domain_warp3(mu_noise_vec3 out, mu_noise_fn3 warp,
+                                    float x, float y, float z, uint32_t seed,
+                                    float warp_amp, float warp_freq)
 {
     float qx = warp(x * warp_freq, y * warp_freq, z * warp_freq, seed ^ 0xA511E9B3u);
     float qy = warp((x + 19.19f) * warp_freq, (y - 33.47f) * warp_freq, (z + 11.73f) * warp_freq, seed ^ 0x63D83595u);
     float qz = warp((x - 47.11f) * warp_freq, (y +  7.23f) * warp_freq, (z + 29.91f) * warp_freq, seed ^ 0xC2B2AE35u);
-    return mu_noise_v3(x + warp_amp * qx, y + warp_amp * qy, z + warp_amp * qz);
+    mu_noise_v3(out, x + warp_amp * qx, y + warp_amp * qy, z + warp_amp * qz);
 }
 
 MU_INLINE float mu_noise_domain_warped2(mu_noise_fn2 base, mu_noise_fn2 warp, float x, float y, uint32_t seed, float warp_amp, float warp_freq)
 {
-    mu_noise_vec2 p = mu_noise_domain_warp2(warp, x, y, seed, warp_amp, warp_freq);
-    return base(p.x, p.y, seed);
+    mu_noise_vec2 p;
+    mu_noise_domain_warp2(p, warp, x, y, seed, warp_amp, warp_freq);
+    return base(p[0], p[1], seed);
 }
 
 MU_INLINE float mu_noise_domain_warped3(mu_noise_fn3 base, mu_noise_fn3 warp, float x, float y, float z, uint32_t seed, float warp_amp, float warp_freq)
 {
-    mu_noise_vec3 p = mu_noise_domain_warp3(warp, x, y, z, seed, warp_amp, warp_freq);
-    return base(p.x, p.y, p.z, seed);
+    mu_noise_vec3 p;
+    mu_noise_domain_warp3(p, warp, x, y, z, seed, warp_amp, warp_freq);
+    return base(p[0], p[1], p[2], seed);
 }
 
 /*
     Anisotropic warp. Separate amplitudes and frequencies let you stretch
     noise along one axis (wind, water currents, brushed materials).
 */
-MU_INLINE mu_noise_vec2 mu_noise_domain_warp2_ex(mu_noise_fn2 warp,
-                                                 float x, float y, uint32_t seed,
-                                                 float amp_x, float amp_y,
-                                                 float freq_x, float freq_y)
+MU_INLINE void mu_noise_domain_warp2_ex(mu_noise_vec2 out, mu_noise_fn2 warp,
+                                       float x, float y, uint32_t seed,
+                                       float amp_x, float amp_y,
+                                       float freq_x, float freq_y)
 {
     float qx = warp(x * freq_x, y * freq_y, seed ^ 0xA511E9B3u);
     float qy = warp((x + 19.19f) * freq_x, (y - 33.47f) * freq_y, seed ^ 0x63D83595u);
-    return mu_noise_v2(x + amp_x * qx, y + amp_y * qy);
+    mu_noise_v2(out, x + amp_x * qx, y + amp_y * qy);
 }
 
-MU_INLINE mu_noise_vec3 mu_noise_domain_warp3_ex(mu_noise_fn3 warp,
-                                                 float x, float y, float z,
-                                                 uint32_t seed,
-                                                 float amp_x, float amp_y, float amp_z,
-                                                 float freq_x, float freq_y, float freq_z)
+MU_INLINE void mu_noise_domain_warp3_ex(mu_noise_vec3 out, mu_noise_fn3 warp,
+                                       float x, float y, float z,
+                                       uint32_t seed,
+                                       float amp_x, float amp_y, float amp_z,
+                                       float freq_x, float freq_y, float freq_z)
 {
     float qx = warp(x * freq_x, y * freq_y, z * freq_z, seed ^ 0xA511E9B3u);
     float qy = warp((x + 19.19f) * freq_x, (y - 33.47f) * freq_y,
                     (z + 11.73f) * freq_z, seed ^ 0x63D83595u);
     float qz = warp((x - 47.11f) * freq_x, (y + 7.23f) * freq_y,
                     (z + 29.91f) * freq_z, seed ^ 0xC2B2AE35u);
-    return mu_noise_v3(x + amp_x * qx, y + amp_y * qy, z + amp_z * qz);
+    mu_noise_v3(out, x + amp_x * qx, y + amp_y * qy, z + amp_z * qz);
 }
 
 /*
@@ -3485,30 +3579,31 @@ MU_INLINE mu_noise_vec3 mu_noise_domain_warp3_ex(mu_noise_fn3 warp,
     Two or three levels are usually enough. More levels quickly turn into
     high-frequency smoke and are expensive.
 */
-MU_INLINE mu_noise_vec2 mu_noise_domain_warp2_recursive(mu_noise_fn2 warp,
-                                                        float x, float y,
-                                                        uint32_t seed,
-                                                        float warp_amp, float warp_freq,
-                                                        int levels)
+MU_INLINE void mu_noise_domain_warp2_recursive(mu_noise_vec2 out, mu_noise_fn2 warp,
+                                              float x, float y, uint32_t seed,
+                                              float warp_amp, float warp_freq,
+                                              int levels)
 {
-    mu_noise_vec2 p = mu_noise_v2(x, y);
+    mu_noise_vec2 p;
+    mu_noise_v2(p, x, y);
     for (int i = 0; i < levels; ++i)
-        p = mu_noise_domain_warp2(warp, p.x, p.y, seed + (uint32_t)i * 0x9E3779B9u,
-                                  warp_amp, warp_freq);
-    return p;
+        mu_noise_domain_warp2(p, warp, p[0], p[1], seed + (uint32_t)i * 0x9E3779B9u,
+                              warp_amp, warp_freq);
+    memcpy(out, p, sizeof(mu_noise_vec2));
 }
 
-MU_INLINE mu_noise_vec3 mu_noise_domain_warp3_recursive(mu_noise_fn3 warp,
-                                                        float x, float y, float z,
-                                                        uint32_t seed,
-                                                        float warp_amp, float warp_freq,
-                                                        int levels)
+MU_INLINE void mu_noise_domain_warp3_recursive(mu_noise_vec3 out, mu_noise_fn3 warp,
+                                              float x, float y, float z,
+                                              uint32_t seed,
+                                              float warp_amp, float warp_freq,
+                                              int levels)
 {
-    mu_noise_vec3 p = mu_noise_v3(x, y, z);
+    mu_noise_vec3 p;
+    mu_noise_v3(p, x, y, z);
     for (int i = 0; i < levels; ++i)
-        p = mu_noise_domain_warp3(warp, p.x, p.y, p.z, seed + (uint32_t)i * 0x9E3779B9u,
-                                  warp_amp, warp_freq);
-    return p;
+        mu_noise_domain_warp3(p, warp, p[0], p[1], p[2], seed + (uint32_t)i * 0x9E3779B9u,
+                              warp_amp, warp_freq);
+    memcpy(out, p, sizeof(mu_noise_vec3));
 }
 
 MU_INLINE float mu_noise_domain_warped2_recursive(mu_noise_fn2 base, mu_noise_fn2 warp,
@@ -3516,9 +3611,9 @@ MU_INLINE float mu_noise_domain_warped2_recursive(mu_noise_fn2 base, mu_noise_fn
                                                   float warp_amp, float warp_freq,
                                                   int levels)
 {
-    mu_noise_vec2 p = mu_noise_domain_warp2_recursive(warp, x, y, seed,
-                                                      warp_amp, warp_freq, levels);
-    return base(p.x, p.y, seed);
+    mu_noise_vec2 p;
+    mu_noise_domain_warp2_recursive(p, warp, x, y, seed, warp_amp, warp_freq, levels);
+    return base(p[0], p[1], seed);
 }
 
 MU_INLINE float mu_noise_domain_warped3_recursive(mu_noise_fn3 base, mu_noise_fn3 warp,
@@ -3527,9 +3622,9 @@ MU_INLINE float mu_noise_domain_warped3_recursive(mu_noise_fn3 base, mu_noise_fn
                                                   float warp_amp, float warp_freq,
                                                   int levels)
 {
-    mu_noise_vec3 p = mu_noise_domain_warp3_recursive(warp, x, y, z, seed,
-                                                      warp_amp, warp_freq, levels);
-    return base(p.x, p.y, p.z, seed);
+    mu_noise_vec3 p;
+    mu_noise_domain_warp3_recursive(p, warp, x, y, z, seed, warp_amp, warp_freq, levels);
+    return base(p[0], p[1], p[2], seed);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3546,7 +3641,8 @@ MU_INLINE float mu_noise_domain_warped3_recursive(mu_noise_fn3 base, mu_noise_fn
       dPsi/dx ≈ (Psi(x+e,y)-Psi(x-e,y))/(2e)
       dPsi/dy ≈ (Psi(x,y+e)-Psi(x,y-e))/(2e)
 */
-MU_INLINE mu_noise_vec2 mu_noise_curl2(mu_noise_fn2 potential, float x, float y, uint32_t seed, float eps)
+MU_INLINE void mu_noise_curl2(mu_noise_vec2 out, mu_noise_fn2 potential,
+                              float x, float y, uint32_t seed, float eps)
 {
     float ex = (eps > 0.0f) ? eps : 1.0e-3f;
 
@@ -3558,7 +3654,7 @@ MU_INLINE mu_noise_vec2 mu_noise_curl2(mu_noise_fn2 potential, float x, float y,
     float dpsi_dx = (p_x1 - p_x0) / (2.0f * ex);
     float dpsi_dy = (p_y1 - p_y0) / (2.0f * ex);
 
-    return mu_noise_v2(dpsi_dy, -dpsi_dx);
+    mu_noise_v2(out, dpsi_dy, -dpsi_dx);
 }
 
 /*
@@ -3572,7 +3668,8 @@ MU_INLINE mu_noise_vec2 mu_noise_curl2(mu_noise_fn2 potential, float x, float y,
 
     We generate Ax,Ay,Az from the same scalar noise with different seeds.
 */
-MU_INLINE mu_noise_vec3 mu_noise_curl3(mu_noise_fn3 scalar, float x, float y, float z, uint32_t seed, float eps)
+MU_INLINE void mu_noise_curl3(mu_noise_vec3 out, mu_noise_fn3 scalar,
+                              float x, float y, float z, uint32_t seed, float eps)
 {
     float ex = (eps > 0.0f) ? eps : 1.0e-3f;
 
@@ -3607,34 +3704,37 @@ MU_INLINE mu_noise_vec3 mu_noise_curl3(mu_noise_fn3 scalar, float x, float y, fl
     float dAy_dx = (Ay_x1 - Ay_x0) / (2.0f * ex);
     float dAx_dy = (Ax_y1 - Ax_y0) / (2.0f * ex);
 
-    return mu_noise_v3(
+    mu_noise_v3(out,
         dAz_dy - dAy_dz,
         dAx_dz - dAz_dx,
         dAy_dx - dAx_dy
     );
 }
 
-MU_INLINE mu_noise_vec2 mu_noise_curl2_normalized(mu_noise_fn2 potential,
-                                                   float x, float y, uint32_t seed,
-                                                   float eps)
+MU_INLINE void mu_noise_curl2_normalized(mu_noise_vec2 out, mu_noise_fn2 potential,
+                                        float x, float y, uint32_t seed, float eps)
 {
-    mu_noise_vec2 v = mu_noise_curl2(potential, x, y, seed, eps);
-    return mu_noise_v2_normalize(v, 1.0e-8f);
+    mu_noise_vec2 v;
+    mu_noise_curl2(v, potential, x, y, seed, eps);
+    mu_noise_v2_normalize(out, v, 1.0e-8f);
 }
 
-MU_INLINE mu_noise_vec3 mu_noise_curl3_normalized(mu_noise_fn3 scalar,
-                                                   float x, float y, float z,
-                                                   uint32_t seed, float eps)
+MU_INLINE void mu_noise_curl3_normalized(mu_noise_vec3 out, mu_noise_fn3 scalar,
+                                        float x, float y, float z,
+                                        uint32_t seed, float eps)
 {
-    mu_noise_vec3 v = mu_noise_curl3(scalar, x, y, z, seed, eps);
-    return mu_noise_v3_normalize(v, 1.0e-8f);
+    mu_noise_vec3 v;
+    mu_noise_curl3(v, scalar, x, y, z, seed, eps);
+    mu_noise_v3_normalize(out, v, 1.0e-8f);
 }
 
 MU_INLINE float mu_noise_curl2_magnitude(mu_noise_fn2 potential,
                                           float x, float y, uint32_t seed,
                                           float eps)
 {
-    return mu_noise_v2_len(mu_noise_curl2(potential, x, y, seed, eps));
+    mu_noise_vec2 v;
+    mu_noise_curl2(v, potential, x, y, seed, eps);
+    return mu_noise_v2_len(v);
 }
 
 /* Divergence of an arbitrary 2D vector field, by central differences. */
@@ -3642,11 +3742,15 @@ MU_INLINE float mu_noise_divergence2_fd(mu_noise_vfn2 field, float x, float y,
                                         uint32_t seed, float eps)
 {
     float e = (eps > 0.0f) ? eps : 1.0e-3f;
-    mu_noise_vec2 px1 = field(x + e, y, seed);
-    mu_noise_vec2 px0 = field(x - e, y, seed);
-    mu_noise_vec2 py1 = field(x, y + e, seed);
-    mu_noise_vec2 py0 = field(x, y - e, seed);
-    return (px1.x - px0.x) / (2.0f * e) + (py1.y - py0.y) / (2.0f * e);
+    mu_noise_vec2 px1;
+    field(px1, x + e, y, seed);
+    mu_noise_vec2 px0;
+    field(px0, x - e, y, seed);
+    mu_noise_vec2 py1;
+    field(py1, x, y + e, seed);
+    mu_noise_vec2 py0;
+    field(py0, x, y - e, seed);
+    return (px1[0] - px0[0]) / (2.0f * e) + (py1[1] - py0[1]) / (2.0f * e);
 }
 
 /* Divergence of an arbitrary 3D vector field, by central differences. */
@@ -3654,15 +3758,21 @@ MU_INLINE float mu_noise_divergence3_fd(mu_noise_vfn3 field, float x, float y,
                                         float z, uint32_t seed, float eps)
 {
     float e = (eps > 0.0f) ? eps : 1.0e-3f;
-    mu_noise_vec3 px1 = field(x + e, y, z, seed);
-    mu_noise_vec3 px0 = field(x - e, y, z, seed);
-    mu_noise_vec3 py1 = field(x, y + e, z, seed);
-    mu_noise_vec3 py0 = field(x, y - e, z, seed);
-    mu_noise_vec3 pz1 = field(x, y, z + e, seed);
-    mu_noise_vec3 pz0 = field(x, y, z - e, seed);
-    return (px1.x - px0.x) / (2.0f * e) +
-           (py1.y - py0.y) / (2.0f * e) +
-           (pz1.z - pz0.z) / (2.0f * e);
+    mu_noise_vec3 px1;
+    field(px1, x + e, y, z, seed);
+    mu_noise_vec3 px0;
+    field(px0, x - e, y, z, seed);
+    mu_noise_vec3 py1;
+    field(py1, x, y + e, z, seed);
+    mu_noise_vec3 py0;
+    field(py0, x, y - e, z, seed);
+    mu_noise_vec3 pz1;
+    field(pz1, x, y, z + e, seed);
+    mu_noise_vec3 pz0;
+    field(pz0, x, y, z - e, seed);
+    return (px1[0] - px0[0]) / (2.0f * e) +
+           (py1[1] - py0[1]) / (2.0f * e) +
+           (pz1[2] - pz0[2]) / (2.0f * e);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3919,8 +4029,8 @@ MU_INLINE float mu_noise_simplex1(float x, uint32_t seed)
     evaluations a central difference would need, and it does not step off the
     lattice to get it.
 
-    The gradient is returned in .gradient.x so the type matches the 2D/3D/4D
-    derivative samplers; .gradient.y is always 0.
+    The gradient is returned in .gradient[0] so the type matches the 2D/3D/4D
+    derivative samplers; .gradient[1] is always 0.
 */
 MU_INLINE mu_noise_sample2 mu_noise_simplex1_deriv(float x, uint32_t seed)
 {
@@ -3954,7 +4064,7 @@ MU_INLINE mu_noise_sample2 mu_noise_simplex1_deriv(float x, uint32_t seed)
     }
 
     r.value = 3.1604938f * (n0 + n1);
-    r.gradient = mu_noise_v2(3.1604938f * (d0 + d1), 0.0f);
+    memcpy(r.gradient, (mu_noise_vec2){3.1604938f * (d0 + d1), 0.0f}, sizeof(r.gradient));
     return r;
 }
 
@@ -4006,9 +4116,10 @@ MU_INLINE float mu_noise_flow2_sc(float x, float y, float sin_t, float cos_t, ui
     float t0 = 0.5f - x0 * x0 - y0 * y0;
     if (t0 > 0.0f)
     {
-        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(i, j, seed));
-        float gx = cos_t * g.x - sin_t * g.y;
-        float gy = sin_t * g.x + cos_t * g.y;
+        mu_noise_vec2 g;
+        mu_noise_grad2_from_hash(g, mu_noise_hash_2i(i, j, seed));
+        float gx = cos_t * g[0] - sin_t * g[1];
+        float gy = sin_t * g[0] + cos_t * g[1];
         t0 *= t0;
         n0 = t0 * t0 * (gx * x0 + gy * y0);
     }
@@ -4016,9 +4127,10 @@ MU_INLINE float mu_noise_flow2_sc(float x, float y, float sin_t, float cos_t, ui
     float t1 = 0.5f - x1 * x1 - y1 * y1;
     if (t1 > 0.0f)
     {
-        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(i + i1, j + j1, seed));
-        float gx = cos_t * g.x - sin_t * g.y;
-        float gy = sin_t * g.x + cos_t * g.y;
+        mu_noise_vec2 g;
+        mu_noise_grad2_from_hash(g, mu_noise_hash_2i(i + i1, j + j1, seed));
+        float gx = cos_t * g[0] - sin_t * g[1];
+        float gy = sin_t * g[0] + cos_t * g[1];
         t1 *= t1;
         n1 = t1 * t1 * (gx * x1 + gy * y1);
     }
@@ -4026,9 +4138,10 @@ MU_INLINE float mu_noise_flow2_sc(float x, float y, float sin_t, float cos_t, ui
     float t2 = 0.5f - x2 * x2 - y2 * y2;
     if (t2 > 0.0f)
     {
-        mu_noise_vec2 g = mu_noise_grad2_from_hash(mu_noise_hash_2i(i + 1, j + 1, seed));
-        float gx = cos_t * g.x - sin_t * g.y;
-        float gy = sin_t * g.x + cos_t * g.y;
+        mu_noise_vec2 g;
+        mu_noise_grad2_from_hash(g, mu_noise_hash_2i(i + 1, j + 1, seed));
+        float gx = cos_t * g[0] - sin_t * g[1];
+        float gy = sin_t * g[0] + cos_t * g[1];
         t2 *= t2;
         n2 = t2 * t2 * (gx * x2 + gy * y2);
     }
@@ -4052,20 +4165,21 @@ MU_INLINE float mu_noise_flow3_axis(float x, float y, float z,
                                     float axis_x, float axis_y, float axis_z,
                                     float angle, uint32_t seed)
 {
-    mu_noise_vec3 axis = mu_noise_v3_normalize(mu_noise_v3(axis_x, axis_y, axis_z), 1e-6f);
+    mu_noise_vec3 axis;
+    mu_noise_v3_normalize(axis, (mu_noise_vec3){axis_x, axis_y, axis_z}, 1e-6f);
     float c = cosf(angle);
     float s = sinf(angle);
     float k = 1.0f - c;
 
-    float m00 = c + axis.x * axis.x * k;
-    float m01 = axis.x * axis.y * k - axis.z * s;
-    float m02 = axis.x * axis.z * k + axis.y * s;
-    float m10 = axis.y * axis.x * k + axis.z * s;
-    float m11 = c + axis.y * axis.y * k;
-    float m12 = axis.y * axis.z * k - axis.x * s;
-    float m20 = axis.z * axis.x * k - axis.y * s;
-    float m21 = axis.z * axis.y * k + axis.x * s;
-    float m22 = c + axis.z * axis.z * k;
+    float m00 = c + axis[0] * axis[0] * k;
+    float m01 = axis[0] * axis[1] * k - axis[2] * s;
+    float m02 = axis[0] * axis[2] * k + axis[1] * s;
+    float m10 = axis[1] * axis[0] * k + axis[2] * s;
+    float m11 = c + axis[1] * axis[1] * k;
+    float m12 = axis[1] * axis[2] * k - axis[0] * s;
+    float m20 = axis[2] * axis[0] * k - axis[1] * s;
+    float m21 = axis[2] * axis[1] * k + axis[0] * s;
+    float m22 = c + axis[2] * axis[2] * k;
 
     const float F3 = 1.0f / 3.0f;
     const float G3 = 1.0f / 6.0f;
@@ -4104,10 +4218,11 @@ MU_INLINE float mu_noise_flow3_axis(float x, float y, float z,
     tt = 0.5f - x0 * x0 - y0 * y0 - z0 * z0;
     if (tt > 0.0f)
     {
-        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i, j, k3, seed));
-        float gx = m00 * g.x + m01 * g.y + m02 * g.z;
-        float gy = m10 * g.x + m11 * g.y + m12 * g.z;
-        float gz = m20 * g.x + m21 * g.y + m22 * g.z;
+        mu_noise_vec3 g;
+        mu_noise_grad3_from_hash(g, mu_noise_hash_3i(i, j, k3, seed));
+        float gx = m00 * g[0] + m01 * g[1] + m02 * g[2];
+        float gy = m10 * g[0] + m11 * g[1] + m12 * g[2];
+        float gz = m20 * g[0] + m21 * g[1] + m22 * g[2];
         tt *= tt;
         n0 = tt * tt * (gx * x0 + gy * y0 + gz * z0);
     }
@@ -4115,10 +4230,11 @@ MU_INLINE float mu_noise_flow3_axis(float x, float y, float z,
     tt = 0.5f - x1 * x1 - y1 * y1 - z1 * z1;
     if (tt > 0.0f)
     {
-        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + i1, j + j1, k3 + k1, seed));
-        float gx = m00 * g.x + m01 * g.y + m02 * g.z;
-        float gy = m10 * g.x + m11 * g.y + m12 * g.z;
-        float gz = m20 * g.x + m21 * g.y + m22 * g.z;
+        mu_noise_vec3 g;
+        mu_noise_grad3_from_hash(g, mu_noise_hash_3i(i + i1, j + j1, k3 + k1, seed));
+        float gx = m00 * g[0] + m01 * g[1] + m02 * g[2];
+        float gy = m10 * g[0] + m11 * g[1] + m12 * g[2];
+        float gz = m20 * g[0] + m21 * g[1] + m22 * g[2];
         tt *= tt;
         n1 = tt * tt * (gx * x1 + gy * y1 + gz * z1);
     }
@@ -4126,10 +4242,11 @@ MU_INLINE float mu_noise_flow3_axis(float x, float y, float z,
     tt = 0.5f - x2 * x2 - y2 * y2 - z2 * z2;
     if (tt > 0.0f)
     {
-        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + i2, j + j2, k3 + k2, seed));
-        float gx = m00 * g.x + m01 * g.y + m02 * g.z;
-        float gy = m10 * g.x + m11 * g.y + m12 * g.z;
-        float gz = m20 * g.x + m21 * g.y + m22 * g.z;
+        mu_noise_vec3 g;
+        mu_noise_grad3_from_hash(g, mu_noise_hash_3i(i + i2, j + j2, k3 + k2, seed));
+        float gx = m00 * g[0] + m01 * g[1] + m02 * g[2];
+        float gy = m10 * g[0] + m11 * g[1] + m12 * g[2];
+        float gz = m20 * g[0] + m21 * g[1] + m22 * g[2];
         tt *= tt;
         n2 = tt * tt * (gx * x2 + gy * y2 + gz * z2);
     }
@@ -4137,10 +4254,11 @@ MU_INLINE float mu_noise_flow3_axis(float x, float y, float z,
     tt = 0.5f - x3 * x3 - y3 * y3 - z3 * z3;
     if (tt > 0.0f)
     {
-        mu_noise_vec3 g = mu_noise_grad3_from_hash(mu_noise_hash_3i(i + 1, j + 1, k3 + 1, seed));
-        float gx = m00 * g.x + m01 * g.y + m02 * g.z;
-        float gy = m10 * g.x + m11 * g.y + m12 * g.z;
-        float gz = m20 * g.x + m21 * g.y + m22 * g.z;
+        mu_noise_vec3 g;
+        mu_noise_grad3_from_hash(g, mu_noise_hash_3i(i + 1, j + 1, k3 + 1, seed));
+        float gx = m00 * g[0] + m01 * g[1] + m02 * g[2];
+        float gy = m10 * g[0] + m11 * g[1] + m12 * g[2];
+        float gz = m20 * g[0] + m21 * g[1] + m22 * g[2];
         tt *= tt;
         n3 = tt * tt * (gx * x3 + gy * y3 + gz * z3);
     }
@@ -4178,8 +4296,8 @@ MU_INLINE mu_noise_sample2 mu_noise_dfbm2(mu_noise_dfn2 base, float x, float y, 
         mu_noise_sample2 s = base(x * freq, y * freq, seed + (uint32_t)i * 1013u);
         float w = amp * freq;
         sum += amp * s.value;
-        gx += w * s.gradient.x;
-        gy += w * s.gradient.y;
+        gx += w * s.gradient[0];
+        gy += w * s.gradient[1];
         norm += amp;
         freq *= lacunarity;
         amp *= gain;
@@ -4193,7 +4311,7 @@ MU_INLINE mu_noise_sample2 mu_noise_dfbm2(mu_noise_dfn2 base, float x, float y, 
     }
 
     r.value = sum;
-    r.gradient = mu_noise_v2(gx, gy);
+    memcpy(r.gradient, (mu_noise_vec2){gx, gy}, sizeof(r.gradient));
     return r;
 }
 
@@ -4210,9 +4328,9 @@ MU_INLINE mu_noise_sample3 mu_noise_dfbm3(mu_noise_dfn3 base, float x, float y, 
         mu_noise_sample3 s = base(x * freq, y * freq, z * freq, seed + (uint32_t)i * 1013u);
         float w = amp * freq;
         sum += amp * s.value;
-        gx += w * s.gradient.x;
-        gy += w * s.gradient.y;
-        gz += w * s.gradient.z;
+        gx += w * s.gradient[0];
+        gy += w * s.gradient[1];
+        gz += w * s.gradient[2];
         norm += amp;
         freq *= lacunarity;
         amp *= gain;
@@ -4227,7 +4345,7 @@ MU_INLINE mu_noise_sample3 mu_noise_dfbm3(mu_noise_dfn3 base, float x, float y, 
     }
 
     r.value = sum;
-    r.gradient = mu_noise_v3(gx, gy, gz);
+    memcpy(r.gradient, (mu_noise_vec3){gx, gy, gz}, sizeof(r.gradient));
     return r;
 }
 
@@ -4240,10 +4358,12 @@ MU_INLINE mu_noise_sample2 mu_noise_dfbm1(mu_noise_fn1 base, float x, uint32_t s
      * extra evaluations, not 2*octaves. */
     mu_noise_sample2 r;
     r.value = mu_noise_fbm1(base, x, seed, octaves, lacunarity, gain);
-    r.gradient = mu_noise_v2(
+    mu_noise_vec2 slope = {
         (mu_noise_fbm1(base, x + eps, seed, octaves, lacunarity, gain) -
          mu_noise_fbm1(base, x - eps, seed, octaves, lacunarity, gain)) / (2.0f * eps),
-        0.0f);
+        0.0f
+    };
+    memcpy(r.gradient, slope, sizeof(r.gradient));
     return r;
 }
 
@@ -4275,8 +4395,8 @@ MU_INLINE float mu_noise_iq_fbm2(mu_noise_dfn2 base, float x, float y, uint32_t 
     for (int i = 0; i < octaves; ++i)
     {
         mu_noise_sample2 s = base(px, py, seed + (uint32_t)i * 1013u);
-        dx += s.gradient.x;
-        dy += s.gradient.y;
+        dx += s.gradient[0];
+        dy += s.gradient[1];
         f += 0.5f * s.value / (1.0f + dx * dx + dy * dy);
         /* rotate and double: octaves never re-align with the lattice axes */
         {
@@ -4300,9 +4420,9 @@ MU_INLINE float mu_noise_iq_fbm3(mu_noise_dfn3 base, float x, float y, float z, 
     for (int i = 0; i < octaves; ++i)
     {
         mu_noise_sample3 s = base(px, py, pz, seed + (uint32_t)i * 1013u);
-        dx += s.gradient.x;
-        dy += s.gradient.y;
-        dz += s.gradient.z;
+        dx += s.gradient[0];
+        dy += s.gradient[1];
+        dz += s.gradient[2];
         f += 0.5f * s.value / (1.0f + dx * dx + dy * dy + dz * dz);
         {
             float nx = 2.0f * (ca * px - sa * py);

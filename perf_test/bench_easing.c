@@ -376,14 +376,15 @@ MU_BENCH(mu, lerp_out_cubic_x64)
 MU_BENCH(mu, vec3_vec3_x64)
 {
     uint32_t i;
-    mu_vec3 a = mu_vec3_make(0.0f, 1.0f, 2.0f);
-    mu_vec3 b = mu_vec3_make(3.0f, 4.0f, 5.0f);
+    mu_vec3 a = {0.0f, 1.0f, 2.0f};
+    mu_vec3 b = {3.0f, 4.0f, 5.0f};
 
     MU_BENCH_ITERATE(i)
     {
         X64({
-            mu_vec3 r = mu_ease_vec3(MU_EASE_OUT_CUBIC, a, b, t);
-            g_sink += (uint32_t)((r.x + r.y + r.z) * 64.0f);
+            mu_vec3 r;
+            mu_ease_vec3(r, MU_EASE_OUT_CUBIC, a, b, t);
+            g_sink += (uint32_t)((r[0] + r[1] + r[2]) * 64.0f);
         });
     }
 }

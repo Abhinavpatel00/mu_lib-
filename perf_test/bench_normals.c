@@ -14,7 +14,8 @@
  */
 
 #include "mu_bench.h"          /* first: sets _POSIX_C_SOURCE */
-#include "mu_math_legacy.h"
+#include "mu_macros.h"
+#include "mu_math.h"
 
 #include <math.h>
 
@@ -42,22 +43,29 @@ static void setup(void)
 
                 x = x * 1664525u + 1013904223u;
                 v = ((float)(x >> 8) * (1.0f / 16777216.0f) - 0.5f) * 2.0f;
-                (&g_m4[i].col[j].x)[k] = (j == 3) ? (float)(k == 3) : v;
+                g_m4[i][4 * j + 0 + k] = (j == 3) ? (float)(k == 3) : v;
             }
         /* non-uniform scale in the diagonal band, plus a reflection every 3rd */
-        g_m4[i].col[0].x += 1.5f;
-        g_m4[i].col[1].y += 0.75f;
-        g_m4[i].col[2].z += (i % 3 == 0) ? -2.0f : 2.0f;
+        g_m4[i][4 * 0 + 0] += 1.5f;
+        g_m4[i][4 * 1 + 1] += 0.75f;
+        g_m4[i][4 * 2 + 2] += (i % 3 == 0) ? -2.0f : 2.0f;
 
-        g_m3[i].col[0] = mu_vec3_make(g_m4[i].col[0].x, g_m4[i].col[0].y, g_m4[i].col[0].z);
-        g_m3[i].col[1] = mu_vec3_make(g_m4[i].col[1].x, g_m4[i].col[1].y, g_m4[i].col[1].z);
-        g_m3[i].col[2] = mu_vec3_make(g_m4[i].col[2].x, g_m4[i].col[2].y, g_m4[i].col[2].z);
+        mu_vec3 v0;
+        mu_vec3_make(v0, g_m4[i][4 * 0 + 0], g_m4[i][4 * 0 + 1], g_m4[i][4 * 0 + 2]);
+        memcpy(g_m3[i] + 3 * 0, v0, sizeof(mu_vec3));
+        mu_vec3 v1;
+        mu_vec3_make(v1, g_m4[i][4 * 1 + 0], g_m4[i][4 * 1 + 1], g_m4[i][4 * 1 + 2]);
+        memcpy(g_m3[i] + 3 * 1, v1, sizeof(mu_vec3));
+        mu_vec3 v2;
+        mu_vec3_make(v2, g_m4[i][4 * 2 + 0], g_m4[i][4 * 2 + 1], g_m4[i][4 * 2 + 2]);
+        memcpy(g_m3[i] + 3 * 2, v2, sizeof(mu_vec3));
 
         x = x * 1664525u + 1013904223u;
-        g_n[i] = mu_vec3_normalize(mu_vec3_make(
-            (float)(x >> 8) * (1.0f / 16777216.0f) - 0.5f,
-            (float)((x >> 16) & 0xffffu) * (1.0f / 65536.0f) - 0.5f,
-            0.25f));
+        mu_vec3 v3;
+        mu_vec3_make(v3, (float)(x >> 8) * (1.0f / 16777216.0f) - 0.5f, (float)((x >> 16) & 0xffffu) * (1.0f / 65536.0f) - 0.5f, 0.25f);
+        mu_vec3 normalized;
+        mu_vec3_normalize(normalized, v3);
+        memcpy(g_n[i], normalized, sizeof(mu_vec3));
     }
 }
 
@@ -70,16 +78,15 @@ MU_BENCH(normals, mat4_inverse_transpose)
 
     MU_BENCH_ITERATE(it)
     {
-        const mu_mat4 *m = &g_m4[it & (N - 1)];
-        mu_mat4        inv;
-        mu_vec3        n = g_n[it & (N - 1)];
-        mu_vec3        r;
+        const float *m = g_m4[it & (N - 1)];
+        mu_mat4      inv;
+        mu_vec3      n;
+        mu_vec3      r;
 
-        mu_mat4_inverse(m, &inv);
+        memcpy(n, g_n[it & (N - 1)], sizeof(mu_vec3));
+        mu_mat4_inverse(m, inv);
         /* (M^-1)^T * n */
-        r = mu_vec3_make(inv.col[0].x * n.x + inv.col[1].x * n.y + inv.col[2].x * n.z,
-                         inv.col[0].y * n.x + inv.col[1].y * n.y + inv.col[2].y * n.z,
-                         inv.col[0].z * n.x + inv.col[1].z * n.y + inv.col[2].z * n.z);
+        mu_vec3_make(r, inv[4 * 0 + 0] * n[0] + inv[4 * 1 + 0] * n[1] + inv[4 * 2 + 0] * n[2], inv[4 * 0 + 1] * n[0] + inv[4 * 1 + 1] * n[1] + inv[4 * 2 + 1] * n[2], inv[4 * 0 + 2] * n[0] + inv[4 * 1 + 2] * n[1] + inv[4 * 2 + 2] * n[2]);
         acc += mu_vec3_length(r);
     }
     MU_BENCH_DO_NOT_OPTIMIZE(acc);
@@ -93,10 +100,12 @@ MU_BENCH(normals, mat3_inverse_transpose)
 
     MU_BENCH_ITERATE(it)
     {
-        const mu_mat3 *m = &g_m3[it & (N - 1)];
-        mu_mat3        invt = mu_mat3_inverse_transpose(m);
-        mu_vec3        r = mu_mat3_mulv(&invt, g_n[it & (N - 1)]);
+        const float *m = g_m3[it & (N - 1)];
+        mu_mat3      inv_t;
+        mu_vec3      r;
 
+        mu_mat3_inverse_transpose(inv_t, m);
+        mu_mat3_mulv(r, inv_t, g_n[it & (N - 1)]);
         acc += mu_vec3_length(r);
     }
     MU_BENCH_DO_NOT_OPTIMIZE(acc);
@@ -112,7 +121,8 @@ MU_BENCH(normals, mat4_cofactor)
 
     MU_BENCH_ITERATE(it)
     {
-        mu_vec3 r = mu_mat4_normal(&g_m4[it & (N - 1)], g_n[it & (N - 1)]);
+        mu_vec3 r;
+        mu_mat4_normal(r, g_m4[it & (N - 1)], g_n[it & (N - 1)]);
 
         acc += mu_vec3_length(r);
     }
@@ -127,8 +137,11 @@ MU_BENCH(normals, mat3_cofactor)
 
     MU_BENCH_ITERATE(it)
     {
-        mu_mat3 c = mu_mat3_cofactor(&g_m3[it & (N - 1)]);
-        mu_vec3 r = mu_mat3_mulv(&c, g_n[it & (N - 1)]);
+        mu_mat3 c;
+        mu_vec3 r;
+
+        mu_mat3_cofactor(c, g_m3[it & (N - 1)]);
+        mu_mat3_mulv(r, c, g_n[it & (N - 1)]);
 
         acc += mu_vec3_length(r);
     }

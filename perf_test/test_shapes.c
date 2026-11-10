@@ -109,15 +109,15 @@ static void check_normals(mu_shape *s, const char *what)
 {
     uint32_t i;
     int bad_unit = 0, bad_dir = 0;
-    mu_vec3 c = mu_vec3_zero();
+    mu_vec3 c = {0};
 
-    for (i = 0; i < s->npoints; ++i) c = mu_vec3_add(c, s->verts[i].p);
-    c = mu_vec3_scale(c, 1.0f / (float)s->npoints);
+    for (i = 0; i < s->npoints; ++i) mu_vec3_add(c, c, s->verts[i].p);
+    mu_vec3_scale(c, c, 1.0f / (float)s->npoints);
 
     for (i = 0; i < s->npoints; ++i)
     {
         float len = mu_vec3_length(s->verts[i].n);
-        mu_vec3 d = mu_vec3_sub(s->verts[i].p, c);
+        mu_vec3 d; mu_vec3_sub(d, s->verts[i].p, c);
         if (fabsf(len - 1.0f) > 1e-3f && len > 0.0f) ++bad_unit;
         if (mu_vec3_length2(d) > 0.04f && mu_vec3_dot(d, s->verts[i].n) < 0.0f)
             ++bad_dir;
@@ -140,7 +140,7 @@ static void check_uvs(const mu_shape *s, const char *what)
 
     for (i = 0; i < s->npoints; ++i)
     {
-        float u = s->verts[i].uv.x, v = s->verts[i].uv.y;
+        float u = s->verts[i].uv[0], v = s->verts[i].uv[1];
         if (!(u >= -1e-4f && u <= 1.0001f && v >= -1e-4f && v <= 1.0001f)) ++bad;
     }
     ++g_checks;
@@ -160,16 +160,16 @@ static float sdf_two_blobs(mu_vec3 p, void *user)
     const blob_t *b = (const blob_t *)user;
     mu_sdf_sphere_t a, c;
 
-    a.c = mu_vec3_make(-0.55f, 0.0f, 0.0f); a.r = b->r;
-    c.c = mu_vec3_make(0.55f, 0.0f, 0.0f);  c.r = b->r;
-    return mu_sdf_smin(mu_sdf_sphere(p, &a), mu_sdf_sphere(p, &c), b->c.x);
+    mu_vec3_make(a.c, -0.55f, 0.0f, 0.0f); a.r = b->r;
+    mu_vec3_make(c.c, 0.55f, 0.0f, 0.0f);  c.r = b->r;
+    return mu_sdf_smin(mu_sdf_sphere(p, &a), mu_sdf_sphere(p, &c), b->c[0]);
 }
 
 static float sdf_gyroid(mu_vec3 p, void *user)
 {
     float s = user ? *(const float *)user : 2.0f;
-    return sinf(p.x * s) * cosf(p.y * s) + sinf(p.y * s) * cosf(p.z * s) +
-           sinf(p.z * s) * cosf(p.x * s);
+    return sinf(p[0] * s) * cosf(p[1] * s) + sinf(p[1] * s) * cosf(p[2] * s) +
+           sinf(p[2] * s) * cosf(p[0] * s);
 }
 
 int main(void)
@@ -256,8 +256,11 @@ int main(void)
                 int different = b1.npoints != b3.npoints || b1.ntriangles != b3.ntriangles;
 
                 for (i = 0; i < n && !different; ++i)
-                    if (mu_vec3_length2(mu_vec3_sub(b1.verts[i].p, b3.verts[i].p)) > 1e-12f)
-                        different = 1;
+                {
+                    mu_vec3 sub;
+                    mu_vec3_sub(sub, b1.verts[i].p, b3.verts[i].p);
+                    if (mu_vec3_length2(sub) > 1e-12f) different = 1;
+                }
                 check(different, "lsystem: a different seed grows a different tree");
                 mu_shape_free(&b3);
             }
@@ -319,10 +322,10 @@ int main(void)
         cases[0] = mu_shape_cube(1, 1.0f);
         cases[1] = mu_shape_plane(4, 4, 2.0f, 2.0f);   /* boundary everywhere */
         cases[2] = mu_shape_empty();              /* three triangles on one edge */
-        mu_shape_add_vertex(&cases[2], mu_vec3_make(0.0f, 0.0f, 0.0f), 0.0f, 0.0f);
-        mu_shape_add_vertex(&cases[2], mu_vec3_make(1.0f, 0.0f, 0.0f), 1.0f, 0.0f);
-        mu_shape_add_vertex(&cases[2], mu_vec3_make(0.0f, 1.0f, 0.0f), 0.0f, 1.0f);
-        mu_shape_add_vertex(&cases[2], mu_vec3_make(0.0f, 0.0f, 1.0f), 0.0f, 0.0f);
+        mu_shape_add_vertex(&cases[2], (mu_vec3){0.0f, 0.0f, 0.0f}, 0.0f, 0.0f);
+        mu_shape_add_vertex(&cases[2], (mu_vec3){1.0f, 0.0f, 0.0f}, 1.0f, 0.0f);
+        mu_shape_add_vertex(&cases[2], (mu_vec3){0.0f, 1.0f, 0.0f}, 0.0f, 1.0f);
+        mu_shape_add_vertex(&cases[2], (mu_vec3){0.0f, 0.0f, 1.0f}, 0.0f, 0.0f);
         mu_shape_add_triangle(&cases[2], 0, 1, 2);
         mu_shape_add_triangle(&cases[2], 0, 1, 3);
         mu_shape_add_triangle(&cases[2], 1, 0, 3);
@@ -554,10 +557,10 @@ int main(void)
         mu_shape a, b;
         mu_shape_stats sa, sb;
 
-        prof[0] = mu_vec2_make(0.0f, -1.0f);
-        prof[1] = mu_vec2_make(1.0f, -1.0f);
-        prof[2] = mu_vec2_make(1.0f, 1.0f);
-        prof[3] = mu_vec2_make(0.0f, 1.0f);
+        memcpy(prof[0], (mu_vec2){0.0f, -1.0f}, sizeof(prof[0]));
+        memcpy(prof[1], (mu_vec2){1.0f, -1.0f}, sizeof(prof[1]));
+        memcpy(prof[2], (mu_vec2){1.0f, 1.0f}, sizeof(prof[2]));
+        memcpy(prof[3], (mu_vec2){0.0f, 1.0f}, sizeof(prof[3]));
 
         a = mu_shape_lathe(prof, 4, 32, 0);
         b = mu_shape_cylinder(32, 1, 1.0f, 2.0f);
@@ -575,10 +578,10 @@ int main(void)
     {
         /* Closed profile (a square in the r/y half-plane) = a torus: genus 1. */
         mu_vec2 prof[4];
-        prof[0] = mu_vec2_make(1.0f, -0.3f);
-        prof[1] = mu_vec2_make(1.3f, -0.3f);
-        prof[2] = mu_vec2_make(1.3f, 0.3f);
-        prof[3] = mu_vec2_make(1.0f, 0.3f);
+        memcpy(prof[0], (mu_vec2){1.0f, -0.3f}, sizeof(prof[0]));
+        memcpy(prof[1], (mu_vec2){1.3f, -0.3f}, sizeof(prof[1]));
+        memcpy(prof[2], (mu_vec2){1.3f, 0.3f}, sizeof(prof[2]));
+        memcpy(prof[3], (mu_vec2){1.0f, 0.3f}, sizeof(prof[3]));
         expect_solid("lathe_closed", mu_shape_lathe(prof, 4, 24, 1), 1);
     }
 
@@ -589,7 +592,7 @@ int main(void)
         for (i = 0; i < 16; ++i)
         {
             float a = MU_SHAPE_TAU * (float)i / 16.0f;
-            path[i] = mu_vec3_make(cosf(a), 0.0f, sinf(a));
+            memcpy(path[i], (mu_vec3){cosf(a), 0.0f, sinf(a)}, sizeof(path[i]));
         }
         /* a closed path -> a torus (genus 1); an open capped one -> a solid */
         expect_solid("tube_closed", mu_shape_tube(path, 16, 0.25f, 12, 1, 0), 1);
@@ -626,7 +629,7 @@ int main(void)
         {
             float a = MU_SHAPE_TAU * (float)i / 10.0f;
             float r = (i & 1) ? 0.4f : 1.0f;
-            star[i] = mu_vec2_make(r * cosf(a), r * sinf(a));
+            memcpy(star[i], (mu_vec2){r * cosf(a), r * sinf(a)}, sizeof(star[i]));
         }
         want = 10.0 * 0.5 * 1.0 * 0.4 * sin(MU_SHAPE_TAU / 10.0) * 1.5;
 
@@ -644,10 +647,10 @@ int main(void)
             mu_vec2 sq[4];
             mu_shape a, b;
             mu_shape_stats sa, sb;
-            sq[0] = mu_vec2_make(-1.0f, -1.0f);
-            sq[1] = mu_vec2_make(1.0f, -1.0f);
-            sq[2] = mu_vec2_make(1.0f, 1.0f);
-            sq[3] = mu_vec2_make(-1.0f, 1.0f);
+            memcpy(sq[0], (mu_vec2){-1.0f, -1.0f}, sizeof(sq[0]));
+            memcpy(sq[1], (mu_vec2){1.0f, -1.0f}, sizeof(sq[1]));
+            memcpy(sq[2], (mu_vec2){1.0f, 1.0f}, sizeof(sq[2]));
+            memcpy(sq[3], (mu_vec2){-1.0f, 1.0f}, sizeof(sq[3]));
 
             a = mu_shape_extrude(sq, 4, 2.0f, 0.0f);
             b = mu_shape_extrude(sq, 4, 2.0f, 0.2f);
@@ -678,10 +681,10 @@ int main(void)
         mu_shape s;
         mu_shape_stats st;
 
-        sp.c = mu_vec3_make(0.0f, 0.0f, 0.0f);
+        memcpy(sp.c, (mu_vec3){0.0f, 0.0f, 0.0f}, sizeof(sp.c));
         sp.r = 1.0f;
-        s = mu_shape_from_sdf(mu_sdf_sphere, &sp, mu_vec3_make(-1.4f, -1.4f, -1.4f),
-                              mu_vec3_make(1.4f, 1.4f, 1.4f), 32, 0.0f);
+        s = mu_shape_from_sdf(mu_sdf_sphere, &sp, (mu_vec3){-1.4f, -1.4f, -1.4f},
+                              (mu_vec3){1.4f, 1.4f, 1.4f}, 32, 0.0f);
         st = examine("sdf_sphere", mu_shape_clone(&s));
         check(st.watertight, "sdf sphere: watertight out of the box");
         check(st.euler == 2 && st.genus == 0, "sdf sphere: genus 0");
@@ -693,11 +696,11 @@ int main(void)
 
         {
             mu_sdf_torus_t to;
-            to.c = mu_vec3_make(0.0f, 0.0f, 0.0f);
+            memcpy(to.c, (mu_vec3){0.0f, 0.0f, 0.0f}, sizeof(to.c));
             to.major = 1.0f;
             to.minor = 0.35f;
-            s = mu_shape_from_sdf(mu_sdf_torus, &to, mu_vec3_make(-1.6f, -0.6f, -1.6f),
-                                  mu_vec3_make(1.6f, 0.6f, 1.6f), 28, 0.0f);
+            s = mu_shape_from_sdf(mu_sdf_torus, &to, (mu_vec3){-1.6f, -0.6f, -1.6f},
+                                  (mu_vec3){1.6f, 0.6f, 1.6f}, 28, 0.0f);
             st = examine("sdf_torus", mu_shape_clone(&s));
             check(st.euler == 0 && st.genus == 1, "sdf torus: genus 1");
             check_near("sdf torus volume", st.volume,
@@ -713,11 +716,11 @@ int main(void)
             /* k = 0.2: the polynomial smin's zero set grows spurious components
              * once k approaches the feature radius (measured: k = 0.6 turns this
              * two-sphere blend into three closed components, Euler 6). */
-            b.c = mu_vec3_make(0.2f, 0.0f, 0.0f);   /* x = smooth-blend radius */
+            mu_vec3_make(b.c, 0.2f, 0.0f, 0.0f);   /* x = smooth-blend radius */
             b.r = 0.6f;
 
-            s = mu_shape_from_sdf(sdf_two_blobs, &b, mu_vec3_make(-1.6f, -1.0f, -1.0f),
-                                  mu_vec3_make(1.6f, 1.0f, 1.0f), 32, 0.0f);
+            s = mu_shape_from_sdf(sdf_two_blobs, &b, (mu_vec3){-1.6f, -1.0f, -1.0f},
+                                  (mu_vec3){1.6f, 1.0f, 1.0f}, 32, 0.0f);
             st = examine("sdf_blobs", mu_shape_clone(&s));
             v1 = 4.0f / 3.0f * MU_SHAPE_PI * 0.216f;
             check(st.watertight, "sdf blobs: watertight");
@@ -731,8 +734,8 @@ int main(void)
             /* A gyroid is the "no parametrization exists" case: an infinite
              * periodic surface, clipped by the box, so it must be OPEN. */
             float s2 = 3.0f;
-            s = mu_shape_from_sdf(sdf_gyroid, &s2, mu_vec3_make(-2.0f, -2.0f, -2.0f),
-                                  mu_vec3_make(2.0f, 2.0f, 2.0f), 24, 0.0f);
+            s = mu_shape_from_sdf(sdf_gyroid, &s2, (mu_vec3){-2.0f, -2.0f, -2.0f},
+                                  (mu_vec3){2.0f, 2.0f, 2.0f}, 24, 0.0f);
             st = examine("sdf_gyroid", mu_shape_clone(&s));
             check(st.boundary_edges > 0, "sdf gyroid: open where it leaves the box");
             check(st.nonmanifold_edges == 0, "sdf gyroid: manifold");
@@ -821,7 +824,8 @@ int main(void)
         /* A positive scale: volume scales by the determinant, normals stay
          * outward, and nothing needs fixing. */
         mu_shape s = mu_shape_icosphere(2, 1.0f);
-        mu_mat4 m = mu_mat4_scale(mu_vec3_splat(2.0f));
+        mu_mat4 m;
+        mu_mat4_scale(m, (mu_vec3){2.0f, 2.0f, 2.0f});
         mu_shape_stats st;
         float v0 = mu_shape_volume(&s);
 
@@ -846,7 +850,8 @@ int main(void)
          * This is the mu_math 3.16 rule, tested through the mesh path. */
         mu_shape s0 = mu_shape_icosphere(2, 1.0f);
         mu_shape s = mu_shape_clone(&s0);
-        mu_mat4 m = mu_mat4_scale(mu_vec3_make(-1.0f, 1.0f, 1.0f));
+        mu_mat4 m;
+        mu_mat4_scale(m, (mu_vec3){-1.0f, 1.0f, 1.0f});
         mu_shape_stats st;
         float v0 = mu_shape_volume(&s0);
         uint32_t i, cofactor_mismatch = 0, invt_agrees = 0;
@@ -860,7 +865,9 @@ int main(void)
         /* the normal mu_shape_transform produced must be the cofactor one */
         for (i = 0; i < s.npoints; ++i)
         {
-            mu_vec3 want = mu_vec3_normalize(mu_mat4_normal(&m, s0.verts[i].n));
+            mu_vec3 want, wn;
+            mu_mat4_normal(wn, m, s0.verts[i].n);
+            mu_vec3_normalize(want, wn);
             if (mu_vec3_dot(want, s.verts[i].n) < 0.999f) ++cofactor_mismatch;
         }
         check(cofactor_mismatch == 0,
@@ -872,17 +879,14 @@ int main(void)
         {
             mu_mat4 inv;
             mu_vec3 n_invt;
-            mu_mat4_inverse(&m, &inv);
-            n_invt = mu_vec3_make(inv.col[0].x * s0.verts[i].n.x +
-                                  inv.col[1].x * s0.verts[i].n.y +
-                                  inv.col[2].x * s0.verts[i].n.z,
-                                  inv.col[0].y * s0.verts[i].n.x +
-                                  inv.col[1].y * s0.verts[i].n.y +
-                                  inv.col[2].y * s0.verts[i].n.z,
-                                  inv.col[0].z * s0.verts[i].n.x +
-                                  inv.col[1].z * s0.verts[i].n.y +
-                                  inv.col[2].z * s0.verts[i].n.z);
-            n_invt = mu_vec3_normalize(n_invt);
+            const float *nv = s0.verts[i].n;
+            mu_mat4_inverse(m, inv);
+            /* column-major: what an inverse-transpose applied to n would give */
+            mu_vec3_make(n_invt,
+                         inv[0] * nv[0] + inv[4] * nv[1] + inv[8]  * nv[2],
+                         inv[1] * nv[0] + inv[5] * nv[1] + inv[9]  * nv[2],
+                         inv[2] * nv[0] + inv[6] * nv[1] + inv[10] * nv[2]);
+            mu_vec3_normalize(n_invt, n_invt);
             if (mu_vec3_dot(n_invt, s.verts[i].n) > 0.999f) ++invt_agrees;
         }
         check(invt_agrees < s.npoints / 10,
@@ -977,7 +981,7 @@ int main(void)
         mu_shape_free(&bad);
 
         bad = mu_shape_clone(&s);
-        bad.verts[3].p.x = NAN;
+        bad.verts[3].p[0] = NAN;
         check(mu_shape_validate(&bad, err, sizeof err) == 0,
               "validate: catches NaN");
         mu_shape_free(&bad);
