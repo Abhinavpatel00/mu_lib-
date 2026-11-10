@@ -17,6 +17,32 @@ if (mu_input_action_pressed(&actions, ACT_QUIT))  break;
 float move = mu_input_axis(&actions, ACT_LEFT, ACT_RIGHT);
 ```
 
+### Simple / quick-check API (no map needed)
+
+For small demos or "just check if W is down" code, skip the map entirely.
+`MuKey` / `MuMouseButton` are logical, platform-free enums; the backend maps
+each `MuKey` to a physical slot once at startup (the GLFW adapter does this
+for you, so this works with zero setup in a real app):
+
+```c
+mu_input_init(&state);
+mu_input_frame_begin(&state, frame_ns);
+   /* ... push_control / push_pad_* from the platform adapter ... */
+
+if (mu_input_key_pressed(&state, MU_KEY_ESCAPE)) break;   // edge, one frame
+if (mu_input_key_down(&state, MU_KEY_W))          move();  // held
+if (mu_input_key_pressed(&state, MU_KEY_C))       crouch();// tap-safe edge
+if (mu_input_mouse_down(&state, MU_MOUSE_RIGHT))  drag();  // held
+if (mu_input_mouse_pressed(&state, MU_MOUSE_LEFT)) click();// edge
+```
+
+In tests, `mu_input_key_map_identity(&state)` maps `MU_KEY_A -> slot MU_KEY_A`,
+so the enum value *is* the slot. In a backend, call
+`mu_input_key_set_slot(&state, MU_KEY_W, scancode_of_W)` once per key.
+Unmapped keys read `false` (never crash). `mu_input_bind_key(&map, ACT_JUMP,
+&state, MU_KEY_SPACE)` binds an action by logical key, resolving via the
+same map — so the simple and full APIs share one mapping.
+
 No allocation, no globals, no OS headers, no `IMPLEMENTATION` macro: the whole
 header is `MU_INLINE`, so `MU_STATIC` / `MU_DLL_EXPORT` behave as everywhere
 else in `mu/`. It has never seen a window — GLFW lives in one adapter file at
@@ -48,17 +74,27 @@ Both of the first two were caught live in this repo, not in review — see
 
 | Layer | Type | Lifetime | Contents |
 |---|---|---|---|
-| Device state | `MuInputState` | one per process | control bitsets (8×u64), mouse buttons + delta + wheel, 4 pads, the event ring, `dt`, `time_ns` |
+| Device state | `MuInputState` | one per process | control bitsets (8×u64), mouse buttons + delta + wheel, 4 pads + connect bits, `MuKey -> slot` map, the event ring, `dt`, `time_ns`, `tick` |
 | Binding | `MuInputMap` | one per player | up to 128 actions × up to 4 sources, each a `MuInputSource` (8 B) |
-| Snapshot | `MuInputActions` | one per frame | down / down_prev / pressed / released bitsets, `value[128]`, `held_time[128]` |
+| Snapshot | `MuInputActions` | one per frame | down / down_prev / pressed / released bitsets, `value[128]`, `held_time[128]`, `last_pressed_tick[128]`, mouse/wheel copy |
+| Tick snapshot | `MuInputFrame` | one per sim tick | as above but `held_ticks` / `last_pressed_tick` in ticks + `chord_pressed` bitset |
 
 ```c
-typedef struct { int16_t pad; uint8_t kind; uint8_t flags; uint16_t code; uint16_t _pad; } MuInputSource;
+typedef struct MuInputSource {
+    uint16_t kind;     /* CONTROL / PAD_BUTTON / PAD_AXIS */
+    uint16_t code;     /* control slot / pad button / pad axis */
+    int8_t   dir;      /* +1 / -1: invert an axis */
+    int8_t   pad;      /* pad index, -1 for controls */
+    uint8_t  flags;    /* SYMBOL/POSITION + curve (bits 1..2) */
+    uint8_t  deadzone; /* 0xFF = global, else deadzone/255 */
+} MuInputSource; /* 8 B */
 ```
 
 `kind` is `CONTROL` (a keyboard/mouse slot), `PAD_BUTTON` or `PAD_AXIS`;
 `dir = -1` inverts an axis so "stick up" and "W" can drive the same action.
-`flags` is advisory metadata (`SYMBOL` / `POSITION`) used only for UI prompts.
+`flags` is advisory metadata (`SYMBOL` / `POSITION`) used only for UI prompts,
+plus the deadzone curve (`LINEAR` / `SLOPE` / `RADIAL`). `deadzone` is
+per-source (0xFF = use `MuInputState.deadzone`).
 
 ### Frame order
 
@@ -120,20 +156,31 @@ No fire on the press frame, one fire on the boundary, then one per `1/rate`.
 
 | Function | Purpose |
 |---|---|
-| `mu_input_init` / `mu_input_actions_reset` | zero the state / snapshot |
-| `mu_input_frame_begin(state, ns)` | advance the frame: prev←held, clear latch, clamp `dt` |
+| `mu_input_init` / `mu_input_actions_reset` / `mu_input_frame_reset` | zero the state / snapshots |
+| `mu_input_frame_begin(state, ns)` | advance the frame: prev←held, clear latch, clamp `dt`, `tick++` |
 | `mu_input_push_control(state, slot, down, ns)` | keyboard/mouse button edge, ordered |
-| `mu_input_push_pad_button` / `_pad_axis` / `mu_input_pad_connect` | gamepad edges |
-| `mu_input_wheel_add` / `mu_input_wheel_consume` | accumulate + take-once scroll |
-| `mu_input_mouse_move` / `mu_input_mouse_warp` | delta latch; a warp produces no delta |
+| `mu_input_push_pad_button` / `_pad_axis` / `mu_input_pad_connect(state, pad, connected, ns)` | gamepad edges + lifecycle |
+| `mu_input_pad_connected(state, pad)` | is this pad currently connected? |
+| `mu_input_wheel_add` / `mu_input_wheel_consume(state, &x, &y)` | event-only wheel + take-once scroll |
+| `mu_input_mouse_pos` / `mu_input_mouse_move(state, dx, dy)` / `mu_input_mouse_warp` | absolute / relative / warp (no delta) |
 | `mu_input_focus_lost` | drop held keys, no phantom press on regain |
-| `mu_input_control_down` / `_pressed` / `_released` | raw queries (latch-aware `pressed`) |
-| `mu_input_map_init` / `_bind_control` / `_bind_pad_button` / `_bind_pad_axis` | bindings as data |
-| `mu_input_resolve` / `mu_input_action_*` / `mu_input_axis` / `_repeat` | the snapshot API |
-| `mu_input_deadzone_f32` / `_deadzone2_f32` / `_sign_f32` | scalar helpers |
+| `mu_input_control_down` / `_pressed` / `_released` | raw slot queries (latch-aware `pressed`) |
+| `mu_input_key_down` / `_pressed` / `_released(state, MU_KEY_W)` | **simple API**: logical-key queries, no map |
+| `mu_input_mouse_down` / `_pressed` / `_released(state, MU_MOUSE_RIGHT)` | **simple API**: mouse-button queries by enum |
+| `mu_input_key_set_slot` / `_slot` / `_map_identity` / `_map_clear` | backend fills `MuKey -> slot` once; identity for tests |
+| `mu_input_events(state)` / `mu_input_replay_events(state, span)` | record/replay: copy the span before `frame_begin` drains it |
+| `mu_input_map_init` / `_bind_control` / `_bind_key` / `_bind_pad_button` / `_bind_pad_axis` / `_bind_pad_axis_ex` | bindings as data (by slot, by logical key, or axis with deadzone+curve) |
+| `mu_input_resolve` / `mu_input_action_*` / `mu_input_axis` / `_repeat` / `_buffered` | the snapshot API (mouse/wheel copied into actions) |
+| `mu_input_sample_tick(state, map, chords, frame, tick)` | fixed-step tick sampler (deterministic) |
+| `mu_input_buffered` / `mu_input_coyote(frame, action, window_ticks)` | pressed within N ticks? O(1) |
+| `mu_input_chords_init` / `_add` / `mu_input_chord_pressed(frame, i)` | chords with a tick resolution window |
+| `mu_input_frame_down` / `_pressed` / `_value` / `_repeat` | tick-snapshot queries |
+| `mu_input_deadzone_f32` / `_deadzone_slope_f32` / `_deadzone2_f32` / `_sign_f32` | scalar helpers |
 
-Sizes (x86-64, `-O2`): `MuInputState` **6 544 B**, `MuInputActions` 1 096 B,
-`MuInputMap` 4 226 B, `MuInputSource` 8 B. Everything is `MU_INPUT_EVENT_CAP`
+Sizes (x86-64, `-O2`, v2): `MuInputState` **8 768 B** (event is now 32 B:
+`tick` + wheel `value2`), `MuInputActions` **1 624 B** (`last_pressed_tick` +
+mouse/wheel copy), `MuInputFrame` **1 624 B**, `MuInputMap` 4 226 B,
+`MuInputSource` 8 B (unchanged). Everything is `MU_INPUT_EVENT_CAP`
 256 events deep; past that, pushes are counted in `event_dropped` instead of
 silently stitching together a fake ordering. That number is a bug report, not
 noise: a frame that drops events is a frame that stalled.
@@ -168,8 +215,14 @@ The library never names a platform type. A backend implements six things:
 
 `demos/common/platform.c` is the GLFW implementation and the only file in the
 repo that includes `<GLFW/glfw3.h>`. A `platform_input_sdl3.c` with the same six
-functions is the planned drop-in (see `mu_input_decisions.md`; SDL3's event queue
-is the model this API copies, GLFW is the weight we kept).
+functions is the planned drop-in (SDL3's event queue is the model this API
+copies, GLFW is the weight we kept). The adapter fills the `MuKey -> slot` map
+at startup (`fill_key_slots`), so `platform_key_pressed(app, MU_KEY_ESCAPE)`
+and `mu_input_key_down(platform_state(app), MU_KEY_W)` work with zero setup.
+`platform_poll` is split into `platform_poll_events` / `platform_frame_begin`
+/ `platform_resolve` (one clock reading per poll, shared by all callbacks) so
+fixed-step sims can sample N ticks per render frame; `platform_init` /
+`platform_shutdown` are the caller-owned variants of create/destroy.
 
 Two adapter details worth copying into any backend:
 
@@ -194,6 +247,20 @@ asserts:
 - map resolution: multi-source OR, unbound action stays 0, deadzone 0 / rescale
   / radial, `dir = -1` flipping a pad axis, `mu_input_axis` sign, `held_time`,
   and repeat cadence (≈15 repeats over 1.2 s at delay 0.30 / rate 20).
+- **simple API (v2):** `mu_input_key_down/pressed/released` with identity and
+  explicit slot maps (unmapped reads false), `mu_input_mouse_down/pressed/
+  released` by `MuMouseButton` enum, tap-inside-one-frame via the key API;
+- **wheel single-path + consume:** `wheel_add` queues events (not pre-accumulated),
+  `frame_begin` derives `wheel_x/y`, `wheel_consume` is take-once;
+- **pad lifecycle:** connect/disconnect events zero buttons/axes, no phantom
+  press on reconnect;
+- **tick sampler:** `mu_input_sample_tick` + `buffered`/`coyote` exact tick
+  boundary, chord fires only on the second press within the window, tick repeat;
+- **record/replay:** `mu_input_events` span copied before drain, replayed into
+  a fresh state, produces identical held/pressed/wheel;
+- **per-source deadzone:** `bind_pad_axis_ex` with explicit deadzone overrides
+  the global; slope curve + `sign_f32`; `mouse_move` delta; actions carry
+  mouse/wheel (actions-only gameplay).
 
 ```sh
 gcc -std=c99 -O2 -Wall -Wextra -Werror -Iexternal/mu_lib/mu tests/input.c -o input_test -lm && ./input_test
@@ -225,12 +292,11 @@ Verified through the adapter after both fixes: `D` orbits (`yaw` 0 → 0.36),
 
 ## Still missing (roadmap item 2 continues)
 
-- **Chords** and **buffer/coyote windows** measured in ticks rather than
-  seconds. The event ring and `time_ns` are the substrate; the policy is not
-  written.
-- **Record/replay** of the event stream. Canvas is right — ordered, timestamped,
-  allocation-free — but there is no `mu_input_save/load` yet.
-- **IME / text entry.** Deliberately out of scope: `push_*` carries edges, not
-  composed text.
-- Per-player maps exist as data but nothing enumerates devices by
-  player yet (`mu_input_pad_connect` is the seed).
+- **Shipped in v2:** chords, buffer/coyote in ticks, tick sampler, event-span
+  record/replay, pad connect/disconnect, per-source deadzone/curve, simple
+  `MuKey`/`MuMouseButton` API. See the API table above.
+- **Not yet:** `mu_save.h` chunk serialisation of the event span (the span
+  itself is the record format; serialising it is a thin wrapper), IME / text
+  entry (deliberately out of scope: `push_*` carries edges, not composed
+  text), and per-player device enumeration (per-player *maps* exist as data;
+  `pad_connected` + connect events are the seed for enumerating devices).
