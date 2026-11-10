@@ -681,6 +681,38 @@ int main(void)
             }
         }
 
+        /* perspective_zo: zero-to-one depth (D3D/Vulkan/Metal). Two gates —
+         * byte-wise agreement with cglm's rh_zo, and the mapping itself, so a
+         * "simplification" back to the [-1,1] form fails loudly. */
+        {
+            static const float fovs[3] = { 35.0f, 60.0f, 110.0f };
+            static const float aspects[3] = { 0.5f, 1.0f, 16.0f / 9.0f };
+            static const float ranges[3][2] = { { 0.01f, 10.0f }, { 0.1f, 100.0f }, { 1.0f, 5000.0f } };
+            int fi, ai, ri;
+
+            for (fi = 0; fi < 3; ++fi)
+                for (ai = 0; ai < 3; ++ai)
+                    for (ri = 0; ri < 3; ++ri)
+                    {
+                        mu_mat4 proj;
+                        mat4 cproj;
+                        float fovy = mu_radians(fovs[fi]);
+                        float near_z = ranges[ri][0], far_z = ranges[ri][1];
+                        float pn[4] = { 0.0f, 0.0f, -near_z, 1.0f };
+                        float pf[4] = { 0.0f, 0.0f, -far_z, 1.0f };
+                        mu_vec4 cn, cf;
+
+                        mu_mat4_perspective_zo(proj, fovy, aspects[ai], near_z, far_z);
+                        glm_perspective_rh_zo(fovy, aspects[ai], near_z, far_z, cproj);
+                        check_m4("mat4_perspective_zo", &proj, cproj, 1e-5f);
+
+                        mu_mat4_mulv(cn, proj, pn);
+                        mu_mat4_mulv(cf, proj, pf);
+                        check_f("perspective_zo depth at near", cn[2] / cn[3], 0.0f, 1e-4f);
+                        check_f("perspective_zo depth at far",  cf[2] / cf[3], 1.0f, 1e-4f);
+                    }
+        }
+
         /* frustum cull: compacted list must equal the scalar test's list */
         {
             enum { NC = 512 };

@@ -532,6 +532,23 @@ static inline void mu_mat4_perspective(float* r, float fovy_rad, float aspect, f
     r[14] = 2.0f * zfar * znear * nf;
 }
 
+/* Right-handed, zero-to-one depth (D3D / Vulkan / Metal / WebGPU): a point at
+ * z = -znear maps to ndc z = 0, a point at z = -zfar maps to ndc z = 1. The
+ * OpenGL [-1,1] variant above is `mu_mat4_perspective`. Vulkan additionally
+ * wants the Y flip; apply it to the view matrix (or negate r[5]) at the call
+ * site so this stays the same projection every other API sees. */
+static inline void mu_mat4_perspective_zo(float* r, float fovy_rad, float aspect, float znear, float zfar)
+{
+    float f = 1.0f / tanf(0.5f * fovy_rad);
+    float nf = 1.0f / (znear - zfar);
+    mu_mat4_zero(r);
+    r[0] = f / aspect;
+    r[5] = f;
+    r[10] = zfar * nf;
+    r[11] = -1.0f;
+    r[14] = zfar * znear * nf;
+}
+
 static inline void mu_mat4_ortho(float* r, float left, float right, float bottom, float top, float znear, float zfar)
 {
     mu_mat4_identity(r);
