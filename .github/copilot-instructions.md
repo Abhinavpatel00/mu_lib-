@@ -15,6 +15,8 @@
 - Keep code clean and readable.
 - Add short explanatory comments for non-obvious logic (especially bit math and memory layout).
 - Avoid unnecessary branching and defensive checks that add noise without value.
+- Do not break code into unnecessary helper functions. Longer functions are often better; do not extract a helper with one call site or split a function because it is long.
+- Keep `if` blocks and null checks out of setup, demo and tool code: a failure there is fatal where it happens, and callers do not re-check. See `AGENTS.md` §12.5 and §12.6.
 
 ## Memory and checks
 - Do **not** add unnecessary `malloc` null checks in normal paths unless the API contract explicitly requires them.

@@ -83,8 +83,11 @@ layout.
    specialized loop each, choose the separate arrays — moving rows
    between tables at insert/remove time is cheaper than branching on
    every row every frame.
-4. **No pointless null checks.** Eliminate nulls by establishing *invariants*
-   at boundaries, not by nesting `if (p && p->q && p->q->r)`.
+4. **No pointless null checks, no `if` ladders.** Eliminate nulls by
+   establishing *invariants* at boundaries, not by nesting
+   `if (p && p->q && p->q->r)` or by following every call with
+   `if (!x) return false;`. Checks that cannot fail in a working build make
+   code uglier to read and harder to write and reason about (§12.5).
 5. **No data-dependent branches in hot loops.** Sort/bucket/partition the data,
    use predication (`x = c ? a : b`), masking, or `min`/`max`.
 6. **Pointer chasing is the one unforgivable sin.** Each hop is a guaranteed
@@ -104,6 +107,10 @@ layout.
 14. **Do not blindly apply any of this.** Every rule is conditional on the
     workload. SIMD, SoA, branchless code and non-temporal stores all have
     losing cases. That is why rule 12 exists.
+15. **Do not break code into unnecessary helper functions.** Longer
+    functions are often better: they read top to bottom with their state in
+    view. A helper called from one place, or split off only because the
+    function was long, is a cost (§12.6).
 
 ---
 
@@ -1816,11 +1823,57 @@ If an operation can genuinely fail, make failure **explicit** through a boolean
 result, an invalid ID, an error value, or an output parameter. The goal is not
 "fewer null checks," the goal is **stronger contracts**.
 
+**Setup code, demos and tools: straight lines, not ladders.** This is where
+`if` blocks and null checks pile up, and where they buy the least.
+
+- A failure during setup is fatal where it happens: the function that can
+  fail (shader load, texture/buffer/pipeline creation, file open) prints what
+  failed and exits (`MU_PANIC`). Its callers do not test the result. If a
+  helper does not do that yet, change the helper, not the call site.
+- No `if (!x) return false;` after every call, no `ok = ok && ...` chains, no
+  testing the same handle again in every function it passes through.
+- Do not check what cannot happen: a pointer your own caller passed, a count
+  you just computed, `malloc` in a demo or a tool.
+- Check where a value enters the program and can really be wrong (command
+  line, files, results that vary at run time). Check once, there.
+- Prefer data that removes the branch: a loop over zero items instead of
+  `if (count)`, a valid dummy resource instead of an optional one, a table
+  instead of an `if` chain.
+- The test: if deleting the check changes nothing unless there is a bug or a
+  broken install, delete it or make it a debug assert.
+
+```c
+/* avoid this */
+vs = shader_load_file(gpu, "main.vert.spv");
+fs = shader_load_file(gpu, "main.frag.spv");
+if (!vs || !fs) return false;
+color = target_create(gpu, &desc);
+if (!HANDLE_VALID(color)) return false;
+
+/* prefer: each call reports and exits on failure; the caller is three lines */
+vs    = shader_load_file(gpu, "main.vert.spv");
+fs    = shader_load_file(gpu, "main.frag.spv");
+color = target_create(gpu, &desc);
+```
+
 ### 12.6 Functions and APIs
 
 - Prefer meaningful, substantial functions. Do not split code into tiny
   functions for style alone. Extract a function when it gives meaningful reuse,
   a useful boundary, or easier testing.
+- **Do not break code into unnecessary helper functions; longer functions
+  are often better.** A function that reads top to bottom is easier to write
+  and to reason about than the same code spread over helpers that are each
+  called once.
+  - Do not extract a helper that has one call site. Leave the code where it
+    runs and give the block a one-line comment as its heading.
+  - Do not split a function because it is long. Length is not a reason.
+  - Do not write wrappers that only rename or forward a call.
+  - Extract when there are two or more call sites, when an API needs a
+    callback, or when the code is a separate transform with its own inputs
+    and outputs.
+  - A helper that exists only to hide a ladder of checks is the wrong fix;
+    remove the checks (§12.5).
 - Prefer APIs that make misuse difficult and that state ownership, lifetime,
   validity and failure semantics.
 - Resolve/validate resources at system boundaries, not in inner loops.
@@ -2101,6 +2154,9 @@ on contract violations; return `NULL`/`false` for recoverable failures.
 ✗ Optimizing a hypothesis without a measurement.
 ✗ Assuming SIMD / SoA / branchless / non-temporal is always faster.
 ✗ Splitting code into tiny functions "for style" in the hot path.
+✗ A helper function with one call site; splitting a function because it is long.
+✗ `if (!x) return false;` after every setup call; null checks on values that
+  cannot be null; the same handle validated again at every level.
 ✗ Hidden allocation inside helpers, iterators or virtual calls.
 ✗ Serving every subsystem's lifetime from the global allocator.
 ```
@@ -2138,6 +2194,11 @@ CONCURRENCY
 [ ] One writer per datum; local accumulators + single reduce.
 [ ] No false sharing; worker outputs kept separate.
 [ ] Lifetime is inactive-reuse, not delete-while-referenced.
+
+READABILITY
+[ ] No helper with a single call site; no function split only for length.
+[ ] Setup code is straight-line: failures are fatal where they happen, callers do not re-check.
+[ ] No null check or `if` that cannot fire in a working build (assert instead).
 
 PROCESS
 [ ] Before/after measurements exist (MU_SCOPE_TIMER or profiler).
