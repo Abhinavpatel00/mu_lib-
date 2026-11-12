@@ -42,6 +42,7 @@
 #include "mu/mu_length_index.h"
 #include "mu/mu_multi_index.h"
 #include "mu/mu_pcg.h"
+#include "mu/mu_shader_noise.h"
 #include "mu/mu_perf.h"
 #include "mu/mu_spatial_array.h"
 #include "mu/mu_span.h"
